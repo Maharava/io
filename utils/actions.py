@@ -7,27 +7,29 @@ import time
 import logging
 import platform
 import os
+import queue
 
 logger = logging.getLogger("WakeWord.Actions")
 
 class TriggerHandler:
     def __init__(self, action_config, debounce_time=3.0):
-        """
-        Handle actions when wake word is detected
-        
-        Args:
-            action_config: Dictionary with action configuration
-            debounce_time: Minimum time between triggers (seconds)
-        """
+        """Handle actions when wake word is detected"""
         self.action_config = action_config
         self.debounce_time = debounce_time
         self.last_trigger_time = 0
         self.lock = threading.Lock()
+        
+        # Queue for actions to be executed
+        self.action_queue = queue.Queue()
+        
+        # Start the action worker thread
+        self.worker_running = True
+        self.worker_thread = threading.Thread(target=self._action_worker)
+        self.worker_thread.daemon = True
+        self.worker_thread.start()
     
     def trigger(self):
-        """
-        Execute configured action if debounce period has passed
-        """
+        """Execute configured action if debounce period has passed"""
         current_time = time.time()
         
         with self.lock:
@@ -39,18 +41,36 @@ class TriggerHandler:
             # Update last trigger time
             self.last_trigger_time = current_time
         
-        # Execute action in a separate thread to not block audio processing
-        action_thread = threading.Thread(target=self._execute_action)
-        action_thread.daemon = True
-        action_thread.start()
+        # Queue the action for execution
+        action_config = self.action_config.copy()  # Copy to avoid race conditions
+        self.action_queue.put(action_config)
         
         return True
     
-    def _execute_action(self):
+    def _action_worker(self):
+        """Worker thread to execute actions from the queue"""
+        while self.worker_running:
+            try:
+                # Get action with timeout to allow thread to exit
+                action_config = self.action_queue.get(timeout=1.0)
+                
+                # Execute the action
+                self._execute_action(action_config)
+                
+                # Mark task as done
+                self.action_queue.task_done()
+            except queue.Empty:
+                # Timeout waiting for action, just continue
+                pass
+            except Exception as e:
+                logger.error(f"Error in action worker: {e}")
+                # Don't crash the thread on error
+    
+    def _execute_action(self, action_config):
         """Execute the configured action"""
         try:
-            action_type = self.action_config.get("type", "notification")
-            params = self.action_config.get("params", {})
+            action_type = action_config.get("type", "notification")
+            params = action_config.get("params", {})
             
             logger.info(f"Executing action: {action_type}")
             
@@ -79,25 +99,36 @@ class TriggerHandler:
             logger.error(f"Error executing action: {e}")
     
     def _show_notification(self, message):
-        """Show a desktop notification"""
+        """Show a desktop notification with better platform detection"""
         try:
             system = platform.system()
             
             if system == "Windows":
-                # Use Windows toast notifications
-                from win10toast import ToastNotifier
-                toaster = ToastNotifier()
-                toaster.show_toast("Wake Word Detected", message, duration=3)
+                # Use Windows toast notifications if available
+                try:
+                    from win10toast import ToastNotifier
+                    toaster = ToastNotifier()
+                    toaster.show_toast("Wake Word Detected", message, duration=3, threaded=True)
+                except ImportError:
+                    # Fall back to system messaging
+                    self._run_command(f'msg "%username%" "Wake Word Detected: {message}"')
             
             elif system == "Darwin":  # macOS
                 # Use AppleScript for notification
                 cmd = f'osascript -e \'display notification "{message}" with title "Wake Word Detected"\''
-                subprocess.run(cmd, shell=True)
+                subprocess.run(cmd, shell=True, timeout=3)
             
             elif system == "Linux":
-                # Use notify-send on Linux
-                cmd = f'notify-send "Wake Word Detected" "{message}"'
-                subprocess.run(cmd, shell=True)
+                # Try different notification methods
+                try:
+                    # Try notify-send first
+                    subprocess.run(['notify-send', 'Wake Word Detected', message], timeout=3)
+                except FileNotFoundError:
+                    # Try zenity as fallback
+                    try:
+                        subprocess.run(['zenity', '--info', '--text', f'Wake Word Detected: {message}'], timeout=3)
+                    except FileNotFoundError:
+                        logger.warning("No notification tool found on Linux")
             
             else:
                 logger.warning(f"Notifications not implemented for {system}")
@@ -106,22 +137,33 @@ class TriggerHandler:
             logger.error(f"Error showing notification: {e}")
     
     def _run_command(self, command):
-        """Run a shell command"""
+        """Run a shell command with better error handling"""
         try:
-            subprocess.Popen(command, shell=True)
+            # Use subprocess.Popen with proper arguments
+            # Don't use shell=True on Windows for security reasons
+            if platform.system() == "Windows":
+                # Split command into args for Windows
+                subprocess.Popen(command, creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                # Use shell on Unix systems
+                subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
         except Exception as e:
             logger.error(f"Error running command: {e}")
     
     def _send_keyboard_shortcut(self, shortcut):
-        """Send a keyboard shortcut"""
+        """Send a keyboard shortcut with better error handling"""
         try:
             system = platform.system()
             
-            if system == "Windows":
-                import pyautogui
-                # Split shortcut into keys (e.g., "ctrl+shift+a")
-                keys = shortcut.lower().split('+')
-                pyautogui.hotkey(*keys)
+            if system in ["Windows", "Linux"]:
+                try:
+                    import pyautogui
+                    # Split shortcut into keys (e.g., "ctrl+shift+a")
+                    keys = shortcut.lower().split('+')
+                    pyautogui.hotkey(*keys)
+                except ImportError:
+                    logger.error("PyAutoGUI not installed for keyboard shortcuts")
             
             elif system == "Darwin":  # macOS
                 # Convert shortcut to applescript format and execute
@@ -145,12 +187,7 @@ class TriggerHandler:
                 modifiers = ', '.join(f'"{k} down"' for k in as_keys)
                 
                 cmd = f'osascript -e \'tell application "System Events" to keystroke "{main_key}" using {{{modifiers}}}\''
-                subprocess.run(cmd, shell=True)
-            
-            elif system == "Linux":
-                import pyautogui
-                keys = shortcut.lower().split('+')
-                pyautogui.hotkey(*keys)
+                subprocess.run(cmd, shell=True, timeout=3)
             
             else:
                 logger.warning(f"Keyboard shortcuts not implemented for {system}")
@@ -159,7 +196,13 @@ class TriggerHandler:
             logger.error(f"Error sending keyboard shortcut: {e}")
     
     def update_config(self, new_config):
-        """Update action configuration"""
+        """Update action configuration thread-safely"""
         with self.lock:
             self.action_config = new_config
             logger.info(f"Updated action configuration: {new_config}")
+    
+    def shutdown(self):
+        """Shutdown the action worker cleanly"""
+        self.worker_running = False
+        if self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=2.0)

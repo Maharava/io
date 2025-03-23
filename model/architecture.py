@@ -5,65 +5,55 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import os
+from pathlib import Path
 
 logger = logging.getLogger("WakeWord.Model")
 
 class WakeWordModel(nn.Module):
     def __init__(self, n_mfcc=13, num_frames=101):
-        """
-        1D CNN model for wake word detection
-        
-        Args:
-            n_mfcc: Number of MFCC coefficients
-            num_frames: Number of time frames
-        """
+        """1D CNN model for wake word detection"""
         super(WakeWordModel, self).__init__()
         
-        # Input shape: [batch, 1, n_mfcc, num_frames]
-        self.conv1 = nn.Conv1d(n_mfcc, 64, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.pool1 = nn.MaxPool1d(kernel_size=3, stride=2)
+        # Simplified architecture with better tracking of dimensions
+        self.conv_layers = nn.Sequential(
+            # First conv block
+            nn.Conv1d(n_mfcc, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2),
+            
+            # Second conv block
+            nn.Conv1d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2)
+        )
         
-        self.conv2 = nn.Conv1d(64, 64, kernel_size=3, stride=1, padding=1)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.pool2 = nn.MaxPool1d(kernel_size=3, stride=2)
+        # Calculate output size of conv layers for FC layer
+        # Input: [batch, n_mfcc, num_frames]
+        # After conv1 + pool1: [batch, 64, num_frames//2]
+        # After conv2 + pool2: [batch, 64, num_frames//4]
+        fc_input_size = 64 * (num_frames // 4)
         
-        # Calculate size after pooling layers
-        pooled_size = num_frames
-        pooled_size = (pooled_size + 2*1 - 3) // 1 + 1  # conv1 with padding
-        pooled_size = (pooled_size - 3) // 2 + 1        # pool1
-        pooled_size = (pooled_size + 2*1 - 3) // 1 + 1  # conv2 with padding
-        pooled_size = (pooled_size - 3) // 2 + 1        # pool2
-        
-        self.fc1 = nn.Linear(64 * pooled_size, 128)
-        self.fc2 = nn.Linear(128, 1)
+        # Fully connected layers
+        self.fc_layers = nn.Sequential(
+            nn.Linear(fc_input_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
     
     def forward(self, x):
-        """
-        Forward pass through the model
+        """Forward pass through the model"""
+        # Apply conv layers
+        x = self.conv_layers(x)
         
-        Args:
-            x: Input tensor of shape [batch, n_mfcc, num_frames]
-            
-        Returns:
-            Tensor: Model output (wake word confidence)
-        """
-        # Apply first conv block
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = F.relu(x)
-        x = self.pool1(x)
-        
-        # Apply second conv block
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = F.relu(x)
-        x = self.pool2(x)
-        
-        # Flatten and apply fully connected layers
+        # Flatten for FC layers
         x = x.view(x.size(0), -1)
-        x = F.relu(self.fc1(x))
-        x = torch.sigmoid(self.fc2(x))
+        
+        # Apply FC layers
+        x = self.fc_layers(x)
         
         return x
 
@@ -72,8 +62,12 @@ def create_model(n_mfcc=13, num_frames=101):
     return WakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
 
 def save_model(model, path):
-    """Save model to disk"""
+    """Save model to disk with proper resource management"""
     try:
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        
+        # Save the model
         torch.save(model.state_dict(), path)
         logger.info(f"Model saved to {path}")
         return True
@@ -82,7 +76,11 @@ def save_model(model, path):
         return False
 
 def load_model(path, n_mfcc=13, num_frames=101):
-    """Load model from disk"""
+    """Load model from disk with better error handling"""
+    if not path or not os.path.exists(path):
+        logger.error(f"Model file not found: {path}")
+        return None
+    
     try:
         model = create_model(n_mfcc=n_mfcc, num_frames=num_frames)
         model.load_state_dict(torch.load(path))

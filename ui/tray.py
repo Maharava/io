@@ -4,28 +4,24 @@ System tray application for wake word engine
 import sys
 import logging
 import threading
-import PySimpleGUI as sg
 import pystray
 from PIL import Image, ImageDraw
-from ..utils.config import load_config, save_config, update_config
-from ..audio.capture import AudioCapture
+from ..utils.config import load_config, save_config
 from .config import ConfigWindow
 from .training_ui import TrainingWindow
 
 logger = logging.getLogger("WakeWord.UI")
 
 class SystemTrayApp:
-    def __init__(self, audio_capture, detector, config):
+    def __init__(self, audio_processor, config):
         """
         System tray application
         
         Args:
-            audio_capture: AudioCapture instance
-            detector: WakeWordDetector instance
+            audio_processor: AudioProcessor instance
             config: Configuration dictionary
         """
-        self.audio_capture = audio_capture
-        self.detector = detector
+        self.audio_processor = audio_processor
         self.config = config
         self.tray_icon = None
         self.is_running = True
@@ -51,14 +47,12 @@ class SystemTrayApp:
         item_text = item.text.lower()
         
         if item_text == 'enable':
-            if not self.audio_capture.is_running:
-                self.audio_capture.start()
-                logger.info("Wake word detection enabled")
+            self.audio_processor.start()
+            logger.info("Wake word detection enabled")
         
         elif item_text == 'disable':
-            if self.audio_capture.is_running:
-                self.audio_capture.stop()
-                logger.info("Wake word detection disabled")
+            self.audio_processor.stop()
+            logger.info("Wake word detection disabled")
         
         elif item_text == 'settings':
             # Open settings window
@@ -69,9 +63,8 @@ class SystemTrayApp:
             self._open_training_window()
         
         elif item_text == 'exit':
-            # Stop the audio capture
-            if self.audio_capture.is_running:
-                self.audio_capture.stop()
+            # Stop the audio processor
+            self.audio_processor.stop()
             
             # Stop the tray icon
             icon.stop()
@@ -89,7 +82,11 @@ class SystemTrayApp:
     def _run_settings_window(self):
         """Run the settings window"""
         # Create and run the settings window
-        config_window = ConfigWindow(self.config, self.audio_capture, self.detector)
+        config_window = ConfigWindow(
+            self.config, 
+            self.audio_processor.audio_capture, 
+            self.audio_processor.detector
+        )
         new_config = config_window.run()
         
         # Update config if changes were made
@@ -97,9 +94,8 @@ class SystemTrayApp:
             self.config = new_config
             save_config(new_config)
             
-            # Update detector threshold if needed
-            if self.detector and 'threshold' in new_config:
-                self.detector.set_threshold(new_config['threshold'])
+            # Update the audio processor with new config
+            self.audio_processor.update_config(new_config)
     
     def _open_training_window(self):
         """Open the training window"""
@@ -115,13 +111,12 @@ class SystemTrayApp:
         result = training_window.run()
         
         # If training completed successfully, update the model
-        if result and 'model_path' in result:
+        if result and result.get('success') and 'model_path' in result:
             self.config['model_path'] = result['model_path']
             save_config(self.config)
             
-            # Reload the model in the detector
-            if self.detector:
-                self.detector.load_model(result['model_path'])
+            # Update the audio processor with new config
+            self.audio_processor.update_config(self.config)
     
     def run(self):
         """Run the system tray application"""

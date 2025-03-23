@@ -7,8 +7,8 @@ import threading
 import PySimpleGUI as sg
 import logging
 import pyaudio
-import numpy as np
 import wave
+import numpy as np
 from pathlib import Path
 from ..model.training import WakeWordTrainer
 from ..utils.config import load_config, save_config
@@ -24,10 +24,13 @@ class RecordingThread(threading.Thread):
         self.sample_rate = sample_rate
         self.is_running = False
         self.daemon = True
+        self.error = None
     
     def run(self):
         """Record audio for specified duration"""
         self.is_running = True
+        p = None
+        stream = None
         
         try:
             p = pyaudio.PyAudio()
@@ -46,20 +49,36 @@ class RecordingThread(threading.Thread):
                 data = stream.read(1024)
                 frames.append(data)
             
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(self.filename), exist_ok=True)
             
-            # Save to WAV file
-            wf = wave.open(self.filename, 'wb')
-            wf.setnchannels(1)
-            wf.setsampwidth(p.get_sample_format_size(pyaudio.paInt16))
-            wf.setframerate(self.sample_rate)
-            wf.writeframes(b''.join(frames))
-            wf.close()
-            
+            # Save to WAV file if we have frames
+            if frames:
+                with wave.open(self.filename, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(p.get_sample_format_size(pyaudio.paInt16))
+                    wf.setframerate(self.sample_rate)
+                    wf.writeframes(b''.join(frames))
+                
         except Exception as e:
             logger.error(f"Error recording audio: {e}")
+            self.error = str(e)
+        finally:
+            # Clean up resources
+            if stream:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except:
+                    pass
+            
+            if p:
+                try:
+                    p.terminate()
+                except:
+                    pass
+            
+            self.is_running = False
     
     def stop(self):
         """Stop recording"""
@@ -94,7 +113,11 @@ class TrainingThread(threading.Thread):
             if self.progress_callback:
                 self.progress_callback("Training model...", 30)
             
-            model = trainer.train(train_loader, val_loader)
+            model = trainer.train(
+                train_loader, 
+                val_loader, 
+                progress_callback=self.progress_callback
+            )
             
             # Save model
             if self.progress_callback:
@@ -127,12 +150,7 @@ class TrainingThread(threading.Thread):
 
 class TrainingWindow:
     def __init__(self, config):
-        """
-        Training window for wake word models
-        
-        Args:
-            config: Configuration dictionary
-        """
+        """Training window for wake word models"""
         self.config = config
         self.window = None
         self.recording_thread = None
@@ -143,12 +161,7 @@ class TrainingWindow:
         self.negative_files = []
     
     def run(self):
-        """
-        Run the training window
-        
-        Returns:
-            dict: Training result with model_path or None if cancelled
-        """
+        """Run the training window"""
         # Set theme
         sg.theme('DarkBlue')
         
@@ -210,64 +223,61 @@ class TrainingWindow:
             
             if event == sg.WINDOW_CLOSED or event == 'Close':
                 # Stop any running threads
-                if self.recording_thread and self.recording_thread.is_running:
-                    self.recording_thread.stop()
+                self._stop_recording()
                 break
             
             # Wake word recording
             elif event == '-RECORD_WAKE-':
-                self.start_recording(wake_word_dir / f"wake_{len(self.wake_word_files) + 1}.wav", 2)
-                self.window['-RECORD_WAKE-'].update(disabled=True)
-                self.window['-STOP_WAKE-'].update(disabled=False)
-                self.window['-STATUS-'].update('Recording wake word...')
+                filename = wake_word_dir / f"wake_{len(self.wake_word_files) + 1}.wav"
+                if self._start_recording(filename, 2):
+                    self.window['-RECORD_WAKE-'].update(disabled=True)
+                    self.window['-STOP_WAKE-'].update(disabled=False)
+                    self.window['-STATUS-'].update('Recording wake word...')
             
             elif event == '-STOP_WAKE-':
-                if self.recording_thread:
-                    self.recording_thread.stop()
-                    self.recording_thread = None
-                    self.window['-RECORD_WAKE-'].update(disabled=False)
-                    self.window['-STOP_WAKE-'].update(disabled=True)
-                    
-                    # Update file list
-                    self.wake_word_files = list(wake_word_dir.glob("*.wav"))
-                    self.window['-WAKE_COUNT-'].update(f'Current samples: {len(self.wake_word_files)}')
-                    self.window['-PLAY_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
-                    self.window['-DELETE_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
-                    self.window['-TRAIN-'].update(
-                        disabled=(len(self.wake_word_files) < 50 or len(self.negative_files) < 10)
-                    )
-                    self.window['-STATUS-'].update('Wake word sample recorded')
+                self._stop_recording()
+                self.window['-RECORD_WAKE-'].update(disabled=False)
+                self.window['-STOP_WAKE-'].update(disabled=True)
+                
+                # Update file list
+                self.wake_word_files = list(wake_word_dir.glob("*.wav"))
+                self.window['-WAKE_COUNT-'].update(f'Current samples: {len(self.wake_word_files)}')
+                self.window['-PLAY_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
+                self.window['-DELETE_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
+                self.window['-TRAIN-'].update(
+                    disabled=(len(self.wake_word_files) < 50 or len(self.negative_files) < 10)
+                )
+                self.window['-STATUS-'].update('Wake word sample recorded')
             
             # Background recording
             elif event == '-RECORD_NEG-':
-                self.start_recording(negative_dir / f"background_{len(self.negative_files) + 1}.wav", 5)
-                self.window['-RECORD_NEG-'].update(disabled=True)
-                self.window['-STOP_NEG-'].update(disabled=False)
-                self.window['-STATUS-'].update('Recording background sounds...')
+                filename = negative_dir / f"background_{len(self.negative_files) + 1}.wav"
+                if self._start_recording(filename, 5):
+                    self.window['-RECORD_NEG-'].update(disabled=True)
+                    self.window['-STOP_NEG-'].update(disabled=False)
+                    self.window['-STATUS-'].update('Recording background sounds...')
             
             elif event == '-STOP_NEG-':
-                if self.recording_thread:
-                    self.recording_thread.stop()
-                    self.recording_thread = None
-                    self.window['-RECORD_NEG-'].update(disabled=False)
-                    self.window['-STOP_NEG-'].update(disabled=True)
-                    
-                    # Update file list
-                    self.negative_files = list(negative_dir.glob("*.wav"))
-                    self.window['-NEG_COUNT-'].update(f'Current samples: {len(self.negative_files)}')
-                    self.window['-PLAY_NEG-'].update(disabled=len(self.negative_files) == 0)
-                    self.window['-DELETE_NEG-'].update(disabled=len(self.negative_files) == 0)
-                    self.window['-TRAIN-'].update(
-                        disabled=(len(self.wake_word_files) < 50 or len(self.negative_files) < 10)
-                    )
-                    self.window['-STATUS-'].update('Background sample recorded')
+                self._stop_recording()
+                self.window['-RECORD_NEG-'].update(disabled=False)
+                self.window['-STOP_NEG-'].update(disabled=True)
+                
+                # Update file list
+                self.negative_files = list(negative_dir.glob("*.wav"))
+                self.window['-NEG_COUNT-'].update(f'Current samples: {len(self.negative_files)}')
+                self.window['-PLAY_NEG-'].update(disabled=len(self.negative_files) == 0)
+                self.window['-DELETE_NEG-'].update(disabled=len(self.negative_files) == 0)
+                self.window['-TRAIN-'].update(
+                    disabled=(len(self.wake_word_files) < 50 or len(self.negative_files) < 10)
+                )
+                self.window['-STATUS-'].update('Background sample recorded')
             
             # Playback
             elif event == '-PLAY_WAKE-' and len(self.wake_word_files) > 0:
-                self.play_audio(str(self.wake_word_files[-1]))
+                self._play_audio(str(self.wake_word_files[-1]))
             
             elif event == '-PLAY_NEG-' and len(self.negative_files) > 0:
-                self.play_audio(str(self.negative_files[-1]))
+                self._play_audio(str(self.negative_files[-1]))
             
             # Delete samples
             elif event == '-DELETE_WAKE-' and len(self.wake_word_files) > 0:
@@ -283,6 +293,7 @@ class TrainingWindow:
                     self.window['-STATUS-'].update('Wake word sample deleted')
                 except Exception as e:
                     logger.error(f"Error deleting file: {e}")
+                    self.window['-STATUS-'].update(f'Error: {e}')
             
             elif event == '-DELETE_NEG-' and len(self.negative_files) > 0:
                 try:
@@ -297,6 +308,7 @@ class TrainingWindow:
                     self.window['-STATUS-'].update('Background sample deleted')
                 except Exception as e:
                     logger.error(f"Error deleting file: {e}")
+                    self.window['-STATUS-'].update(f'Error: {e}')
             
             # Training
             elif event == '-TRAIN-':
@@ -314,7 +326,61 @@ class TrainingWindow:
                 self.window['-STATUS-'].update('Preparing for training...')
                 
                 # Start training in a separate thread
-                self.training_thread = TrainingThread(
+                self.training_thread = None
+        
+        # Close window
+        self.window.close()
+        return result
+    
+    def _start_recording(self, filename, duration):
+        """Start recording audio with error handling"""
+        if self.recording_thread and self.recording_thread.is_alive():
+            self._stop_recording()
+        
+        try:
+            self.recording_thread = RecordingThread(filename, duration)
+            self.recording_thread.start()
+            return True
+        except Exception as e:
+            logger.error(f"Error starting recording: {e}")
+            self.window['-STATUS-'].update(f'Error: {e}')
+            return False
+    
+    def _stop_recording(self):
+        """Stop recording safely"""
+        if self.recording_thread and self.recording_thread.is_alive():
+            self.recording_thread.stop()
+            self.recording_thread.join(timeout=1.0)
+            self.recording_thread = None
+    
+    def _play_audio(self, filename):
+        """Play an audio file with better error handling"""
+        try:
+            import platform
+            system = platform.system()
+            
+            if system == "Windows":
+                os.startfile(filename)
+            elif system == "Darwin":  # macOS
+                import subprocess
+                subprocess.run(["afplay", filename], check=False)
+            elif system == "Linux":
+                import subprocess
+                subprocess.run(["aplay", filename], check=False)
+            else:
+                logger.warning(f"Audio playback not implemented for {system}")
+                self.window['-STATUS-'].update(f'Audio playback not supported on {system}')
+                
+        except Exception as e:
+            logger.error(f"Error playing audio: {e}")
+            self.window['-STATUS-'].update(f'Error playing audio: {e}')
+    
+    def update_training_progress(self, status_text, progress_value):
+        """Update training progress in UI"""
+        if self.window:
+            self.window['-STATUS-'].update(status_text)
+            if progress_value >= 0:
+                self.window['-PROGRESS-'].update(current_count=progress_value)_thread = TrainingThread(
                     self.wake_word_files, 
                     self.negative_files,
                     model_name,
@@ -341,41 +407,4 @@ class TrainingWindow:
                     self.window['-PLAY_NEG-'].update(disabled=len(self.negative_files) == 0)
                     self.window['-DELETE_NEG-'].update(disabled=len(self.negative_files) == 0)
                 
-                self.training_thread = None
-        
-        # Close window
-        self.window.close()
-        return result
-    
-    def start_recording(self, filename, duration):
-        """Start recording audio"""
-        if self.recording_thread and self.recording_thread.is_alive():
-            self.recording_thread.stop()
-        
-        self.recording_thread = RecordingThread(filename, duration)
-        self.recording_thread.start()
-    
-    def play_audio(self, filename):
-        """Play an audio file"""
-        try:
-            import platform
-            system = platform.system()
-            
-            if system == "Windows":
-                os.system(f'start /min "" "{filename}"')
-            elif system == "Darwin":  # macOS
-                os.system(f'afplay "{filename}"')
-            elif system == "Linux":
-                os.system(f'aplay "{filename}"')
-            else:
-                logger.warning(f"Audio playback not implemented for {system}")
-                
-        except Exception as e:
-            logger.error(f"Error playing audio: {e}")
-    
-    def update_training_progress(self, status_text, progress_value):
-        """Update training progress in UI"""
-        if self.window:
-            self.window['-STATUS-'].update(status_text)
-            if progress_value >= 0:
-                self.window['-PROGRESS-'].update(current_count=progress_value)
+                self.training
