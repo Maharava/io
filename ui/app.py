@@ -153,6 +153,15 @@ class IoApp:
         )
         self.model_status.grid(row=0, column=1, padx=10, pady=10, sticky="w")
         
+        # Add a detection indicator (visual feedback)
+        self.detection_indicator = ctk.CTkLabel(
+            status_frame,
+            text="●",
+            font=ctk.CTkFont(size=24),
+            text_color="gray"
+        )
+        self.detection_indicator.grid(row=0, column=2, padx=10, pady=10, sticky="e")
+        
         # Controls
         control_frame = ctk.CTkFrame(frame)
         control_frame.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
@@ -188,6 +197,21 @@ class IoApp:
         
         self.log_text = ctk.CTkTextbox(log_frame, height=200, state="disabled")
         self.log_text.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+        
+        # Set up detection callback
+        self.audio_processor.set_ui_callback(self._on_detection)
+    
+    def _on_detection(self, confidence):
+        """Handle wake word detection for UI updates"""
+        # Update the log
+        self._log(f"Wake word detected with confidence: {confidence:.4f}")
+        
+        # Flash the indicator
+        self.detection_indicator.configure(text_color="#00FFFF")
+        
+        # Reset the indicator after 1 second
+        if self.window:
+            self.window.after(1000, lambda: self.detection_indicator.configure(text_color="gray"))
     
     def _create_system_tray(self):
         """Create system tray icon"""
@@ -247,7 +271,7 @@ class IoApp:
     
     def _log(self, message):
         """Add a message to the log"""
-        if not self.log_text:
+        if not hasattr(self, 'log_text') or self.log_text is None:
             return
             
         self.log_text.configure(state="normal")

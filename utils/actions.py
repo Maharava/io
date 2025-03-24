@@ -29,13 +29,67 @@ class NotificationAction(ActionStrategy):
         try:
             if system == "Windows":
                 try:
+                    # Try to use Windows 10 toast notifications
                     from win10toast import ToastNotifier
                     toaster = ToastNotifier()
                     toaster.show_toast("Io Wake Word", message, duration=3, threaded=True)
                     return True
                 except ImportError:
-                    # Fall back to system messaging
-                    subprocess.run(f'msg "%username%" "Io Wake Word: {message}"', shell=True)
+                    try:
+                        # Try using Windows Balloon Tip (works on older Windows versions)
+                        import win32api
+                        import win32con
+                        import win32gui
+                        
+                        # Create a dummy window for notifications
+                        wc = win32gui.WNDCLASS()
+                        wc.lpszClassName = "IoWakeWord"
+                        wc.lpfnWndProc = lambda *args: None
+                        wc.hInstance = win32api.GetModuleHandle(None)
+                        wc.hIcon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+                        wc.hCursor = win32gui.LoadCursor(0, win32con.IDC_ARROW)
+                        wc.hbrBackground = win32con.COLOR_WINDOW
+                        
+                        try:
+                            class_atom = win32gui.RegisterClass(wc)
+                            hwnd = win32gui.CreateWindow(class_atom, "IoWakeWord", 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
+                            
+                            # Display balloon notification
+                            nid = (hwnd, 0, win32gui.NIF_INFO, win32con.WM_USER + 20, 
+                                   win32gui.LoadIcon(0, win32con.IDI_APPLICATION), 
+                                   "Io Wake Word", message, 200, 10)
+                            win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, nid)
+                            
+                            # Clean up after a delay
+                            def cleanup():
+                                time.sleep(3)
+                                win32gui.DestroyWindow(hwnd)
+                                win32gui.UnregisterClass(class_atom, wc.hInstance)
+                                
+                            threading.Thread(target=cleanup, daemon=True).start()
+                            return True
+                        except Exception as e:
+                            logger.debug(f"Error with balloon tip: {e}")
+                    except ImportError:
+                        # If all else fails, use PowerShell to show notification
+                        try:
+                            ps_script = f'''
+                            [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
+                            $notify = New-Object System.Windows.Forms.NotifyIcon
+                            $notify.Icon = [System.Drawing.SystemIcons]::Information
+                            $notify.Visible = $true
+                            $notify.ShowBalloonTip(3000, "Io Wake Word", "{message}", [System.Windows.Forms.ToolTipIcon]::Info)
+                            Start-Sleep -s 3
+                            $notify.Dispose()
+                            '''
+                            subprocess.run(['powershell', '-Command', ps_script], 
+                                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                            return True
+                        except Exception as e:
+                            logger.debug(f"Error with PowerShell notification: {e}")
+                    
+                    # Visual indicator as backup
+                    logger.info("Wake word detected! (GUI notification not available)")
                     return True
             
             elif system == "Darwin":  # macOS

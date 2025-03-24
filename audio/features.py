@@ -32,6 +32,13 @@ class FeatureExtractor:
         
         # Running buffer for audio context
         self.audio_buffer = np.zeros(0)
+        
+        # Energy threshold for silence detection
+        self.energy_threshold = 0.005  # Minimum energy to consider non-silence
+        
+        # Number of silence frames in a row
+        self.silence_counter = 0
+        self.max_silence_frames = 5  # How many frames of silence to allow before discarding
     
     def extract(self, audio_frame):
         """Extract MFCC features from audio frame"""
@@ -47,6 +54,16 @@ class FeatureExtractor:
         # Keep only the most recent audio (1 second plus margin)
         if len(self.audio_buffer) > min_samples * 1.2:
             self.audio_buffer = self.audio_buffer[-min_samples:]
+        
+        # Check if audio is silent
+        energy = np.mean(self.audio_buffer**2)
+        if energy < self.energy_threshold:
+            self.silence_counter += 1
+            if self.silence_counter > self.max_silence_frames:
+                logger.debug(f"Silent frame detected, energy: {energy:.6f}")
+                return None  # Don't process silent audio
+        else:
+            self.silence_counter = 0
         
         # Calculate buffer hash for cache lookup
         buffer_hash = hash(self.audio_buffer.tobytes())
@@ -66,32 +83,37 @@ class FeatureExtractor:
                 hop_length=self.hop_length
             )
             
+            # Also extract delta features for better discrimination
+            delta_mfccs = librosa.feature.delta(mfccs)
+            
+            # Combine original and delta features
+            combined_features = np.vstack([mfccs, delta_mfccs])
+            
             # Ensure we have enough frames
-            if mfccs.shape[1] < self.num_frames:
+            if combined_features.shape[1] < self.num_frames:
                 # Pad with zeros if necessary
-                pad_width = self.num_frames - mfccs.shape[1]
-                mfccs = np.pad(mfccs, ((0, 0), (0, pad_width)))
-            elif mfccs.shape[1] > self.num_frames:
+                pad_width = self.num_frames - combined_features.shape[1]
+                combined_features = np.pad(combined_features, ((0, 0), (0, pad_width)))
+            elif combined_features.shape[1] > self.num_frames:
                 # Take the most recent frames
-                mfccs = mfccs[:, -self.num_frames:]
+                combined_features = combined_features[:, -self.num_frames:]
             
-            # Apply normalization
-            mfccs = (mfccs - self.mean[:, np.newaxis]) / (self.std[:, np.newaxis] + 1e-6)
+            # Apply normalization (feature-wise for better robustness)
+            # Use fixed standardization for more consistent results
+            # This is critical for inference stability
+            for i in range(combined_features.shape[0]):
+                feature_mean = np.mean(combined_features[i])
+                feature_std = np.std(combined_features[i])
+                if feature_std > 1e-6:  # Prevent division by zero
+                    combined_features[i] = (combined_features[i] - feature_mean) / feature_std
             
-            # Update normalization parameters with running average
-            alpha = 0.01  # Learning rate for updating mean and std
-            current_mean = np.mean(mfccs, axis=1)
-            current_std = np.std(mfccs, axis=1)
-            self.mean = (1 - alpha) * self.mean + alpha * current_mean
-            self.std = (1 - alpha) * self.std + alpha * current_std
-            
-            # Reshape for the model [batch, channels, mfcc, time]
-            mfccs = np.expand_dims(mfccs, axis=0)
+            # Reshape for the model [batch, channels, features, time]
+            features = np.expand_dims(combined_features, axis=0)
             
             # Cache the result
-            self._update_cache(buffer_hash, mfccs)
+            self._update_cache(buffer_hash, features)
             
-            return mfccs
+            return features
             
         except Exception as e:
             logger.error(f"Error extracting features: {e}")
@@ -111,6 +133,7 @@ class FeatureExtractor:
     def clear_buffer(self):
         """Clear the audio buffer"""
         self.audio_buffer = np.zeros(0)
+        self.silence_counter = 0
     
     def clear_cache(self):
         """Clear the feature cache"""

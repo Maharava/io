@@ -9,6 +9,7 @@ import pyaudio
 import wave
 import tkinter as tk
 import customtkinter as ctk
+import numpy as np
 from pathlib import Path
 import shutil
 

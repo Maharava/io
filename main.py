@@ -68,6 +68,9 @@ class AudioProcessor:
         # Processing queue for passing audio between threads
         self.audio_queue = queue.Queue(maxsize=100)
         
+        # UI callback
+        self.ui_callback = None
+        
         # Initialize components
         self.feature_extractor = FeatureExtractor(
             sample_rate=config["sample_rate"],
@@ -91,6 +94,12 @@ class AudioProcessor:
             frame_size=config["frame_size"],
             callback=self.enqueue_audio
         )
+    
+    def set_ui_callback(self, callback):
+        """Set callback for UI updates"""
+        self.ui_callback = callback
+        # Register this callback with the detector
+        self.detector.register_detection_callback(self.ui_callback)
     
     def enqueue_audio(self, audio_frame):
         """Add audio frame to processing queue"""
@@ -119,7 +128,7 @@ class AudioProcessor:
                     
                     # Trigger action if wake word detected
                     if detection:
-                        logger.info(f"Wake word detected with confidence: {confidence:.4f}")
+                        # Log message moved to detector for better debouncing
                         self.action_handler.trigger()
                 
                 # Mark task as done
@@ -187,16 +196,20 @@ class AudioProcessor:
         if config["audio_device"] != self.config["audio_device"]:
             restart_needed = True
         
+        # Check if model path changed BEFORE updating config
+        model_path_changed = config.get("model_path") != self.config.get("model_path")
+        
         # Update configuration
         self.config = config
         
         # Update detector threshold
         self.detector.set_threshold(config["threshold"])
         
-        # Update model if changed
-        if config["model_path"] != self.config.get("model_path"):
+        # Update model if path changed
+        if model_path_changed:
+            logger.info(f"Loading model from path: {config['model_path']}")
             self.detector.load_model(config["model_path"])
-            
+                
         # Update action handler
         self.action_handler.update_config(config["action"], config["debounce_time"])
         

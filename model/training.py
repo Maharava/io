@@ -131,22 +131,42 @@ class WakeWordTrainer:
             return None
     
     def prepare_data(self, wake_word_files, negative_files, test_size=0.2):
-        """Prepare training and validation datasets"""
+        """Prepare training and validation datasets with more balanced approach"""
         logger.info("Extracting features from wake word samples")
         wake_word_features = self.extract_features(wake_word_files, augment=True)
         
         logger.info("Extracting features from negative samples")
-        negative_features = self.extract_features(negative_files, augment=False)
+        # Apply augmentation to negative samples too for better balance
+        negative_features = self.extract_features(negative_files, augment=True)
         
         # Create labels (1 for wake word, 0 for negative)
         wake_word_labels = np.ones(len(wake_word_features))
         negative_labels = np.zeros(len(negative_features))
         
+        # Check if we need to balance the dataset
+        wake_count = len(wake_word_features)
+        neg_count = len(negative_features)
+        logger.info(f"Raw dataset: {wake_count} wake word samples, {neg_count} negative samples")
+        
+        # Balance dataset if needed - undersample the majority class
+        if wake_count > neg_count * 3:  # If wake word samples are more than 3x negative samples
+            # Randomly select wake word samples to match ratio
+            indices = np.random.choice(wake_count, size=neg_count * 3, replace=False)
+            wake_word_features = [wake_word_features[i] for i in indices]
+            wake_word_labels = np.ones(len(wake_word_features))
+            logger.info(f"Balanced dataset by reducing wake word samples to {len(wake_word_features)}")
+        elif neg_count > wake_count * 3:  # If negative samples are more than 3x wake word samples
+            # Randomly select negative samples to match ratio
+            indices = np.random.choice(neg_count, size=wake_count * 3, replace=False)
+            negative_features = [negative_features[i] for i in indices]
+            negative_labels = np.zeros(len(negative_features))
+            logger.info(f"Balanced dataset by reducing negative samples to {len(negative_features)}")
+        
         # Combine features and labels
         features = wake_word_features + negative_features
         labels = np.concatenate([wake_word_labels, negative_labels])
         
-        # Split into train/validation sets
+        # Split into train/validation sets with stratification
         features_train, features_val, labels_train, labels_val = train_test_split(
             features, labels, test_size=test_size, stratify=labels, random_state=42
         )
@@ -165,29 +185,42 @@ class WakeWordTrainer:
         
         logger.info(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
         return train_loader, val_loader
-    
+
     def train(self, train_loader, val_loader, num_epochs=50, patience=5, progress_callback=None):
-        """Train the wake word model"""
+        """Train the wake word model with improved regularization"""
         # Create model and move to device
-        model = create_model(n_mfcc=self.n_mfcc, num_frames=self.num_frames)
+        model = create_model(n_mfcc=self.n_mfcc * 2, num_frames=self.num_frames)  # Account for delta features
         model.to(self.device)
         
-        # Define loss function and optimizer
-        criterion = nn.BCELoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        # Define loss function with weighting for better balance
+        # This helps particularly if classes are still somewhat imbalanced
+        pos_weight = torch.tensor([1.0])  # Can be adjusted if needed
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # Add weight decay for L2 regularization
+        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+        
+        # Learning rate scheduler for better convergence
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=3, verbose=True
+        )
         
         # Early stopping
         best_val_loss = float('inf')
         best_model = None
         patience_counter = 0
         
+        # F1 score tracking
+        best_f1 = 0.0
+        
         # Training loop
         for epoch in range(num_epochs):
             # Training phase
             model.train()
             train_loss = 0.0
-            correct_train = 0
-            total_train = 0
+            true_positives = 0
+            false_positives = 0
+            false_negatives = 0
             
             for features, labels in train_loader:
                 features, labels = features.to(self.device), labels.to(self.device)
@@ -201,22 +234,34 @@ class WakeWordTrainer:
                 
                 # Backward pass and optimize
                 loss.backward()
+                
+                # Apply gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 
                 # Statistics
                 train_loss += loss.item()
-                predicted = (outputs > 0.5).float()
-                total_train += labels.size(0)
-                correct_train += (predicted == labels).sum().item()
+                predicted = (torch.sigmoid(outputs) > 0.5).float()
+                
+                # Calculate metrics
+                true_positives += ((predicted == 1) & (labels == 1)).sum().item()
+                false_positives += ((predicted == 1) & (labels == 0)).sum().item()
+                false_negatives += ((predicted == 0) & (labels == 1)).sum().item()
             
             train_loss = train_loss / len(train_loader)
-            train_acc = correct_train / total_train
+            
+            # Calculate F1 score
+            precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+            recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
             
             # Validation phase
             model.eval()
             val_loss = 0.0
-            correct_val = 0
-            total_val = 0
+            val_true_positives = 0
+            val_false_positives = 0
+            val_false_negatives = 0
             
             with torch.no_grad():
                 for features, labels in val_loader:
@@ -228,33 +273,47 @@ class WakeWordTrainer:
                     
                     # Statistics
                     val_loss += loss.item()
-                    predicted = (outputs > 0.5).float()
-                    total_val += labels.size(0)
-                    correct_val += (predicted == labels).sum().item()
+                    predicted = (torch.sigmoid(outputs) > 0.5).float()
+                    
+                    # Calculate metrics
+                    val_true_positives += ((predicted == 1) & (labels == 1)).sum().item()
+                    val_false_positives += ((predicted == 1) & (labels == 0)).sum().item()
+                    val_false_negatives += ((predicted == 0) & (labels == 1)).sum().item()
             
             val_loss = val_loss / len(val_loader)
-            val_acc = correct_val / total_val
+            
+            # Calculate validation F1 score
+            val_precision = val_true_positives / (val_true_positives + val_false_positives) if (val_true_positives + val_false_positives) > 0 else 0
+            val_recall = val_true_positives / (val_true_positives + val_false_negatives) if (val_true_positives + val_false_negatives) > 0 else 0
+            val_f1 = 2 * val_precision * val_recall / (val_precision + val_recall) if (val_precision + val_recall) > 0 else 0
+            
+            # Update learning rate based on validation loss
+            scheduler.step(val_loss)
             
             # Progress update
             logger.info(f"Epoch {epoch+1}/{num_epochs}, "
-                       f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                       f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+                       f"Train Loss: {train_loss:.4f}, Train F1: {f1:.4f}, "
+                       f"Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}")
             
             if progress_callback:
                 progress_percent = int(30 + (epoch + 1) / num_epochs * 60)
-                progress_callback(f"Training: Epoch {epoch+1}/{num_epochs}, Accuracy: {val_acc:.2f}", 
+                progress_callback(f"Training: Epoch {epoch+1}/{num_epochs}, Val F1: {val_f1:.2f}", 
                                  progress_percent)
             
             # Check for improvement
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model = model.state_dict().copy()
+                best_f1 = val_f1
                 patience_counter = 0
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
                     logger.info(f"Early stopping at epoch {epoch+1}")
                     break
+        
+        # Log final model performance
+        logger.info(f"Training complete. Best validation F1 score: {best_f1:.4f}")
         
         # Load best model
         model.load_state_dict(best_model)
