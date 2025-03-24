@@ -71,10 +71,13 @@ class AudioProcessor:
         # UI callback
         self.ui_callback = None
         
-        # Initialize components
+        # Initialize components with explicit MFCC parameters
         self.feature_extractor = FeatureExtractor(
             sample_rate=config["sample_rate"],
-            frame_size=config["frame_size"]
+            frame_size=config["frame_size"],
+            n_mfcc=13,  # Explicitly set to 13 MFCC features
+            n_fft=2048,
+            hop_length=160
         )
         
         self.detector = WakeWordDetector(
@@ -191,6 +194,7 @@ class AudioProcessor:
     def update_config(self, config):
         """Update configuration"""
         restart_needed = False
+        load_success = True
         
         # Check if audio device changed
         if config["audio_device"] != self.config["audio_device"]:
@@ -206,10 +210,12 @@ class AudioProcessor:
         self.detector.set_threshold(config["threshold"])
         
         # Update model if path changed
-        if model_path_changed:
+        if model_path_changed and config.get("model_path"):
             logger.info(f"Loading model from path: {config['model_path']}")
-            self.detector.load_model(config["model_path"])
-                
+            load_success = self.detector.load_model(config["model_path"])
+            if not load_success:
+                logger.error("Failed to load model, continuing with previous model if available")
+                    
         # Update action handler
         self.action_handler.update_config(config["action"], config["debounce_time"])
         
@@ -225,7 +231,19 @@ class AudioProcessor:
                 callback=self.enqueue_audio
             )
             
+            # Also update feature extractor with new parameters
+            if "feature_extraction" in config:
+                self.feature_extractor = FeatureExtractor(
+                    sample_rate=config["sample_rate"],
+                    frame_size=config["frame_size"],
+                    n_mfcc=config["feature_extraction"].get("n_mfcc", 13),
+                    n_fft=config["feature_extraction"].get("n_fft", 2048),
+                    hop_length=config["feature_extraction"].get("hop_length", 160)
+                )
+            
             self.start()
+        
+        return load_success
 
 
 def main():

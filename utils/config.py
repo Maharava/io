@@ -84,7 +84,13 @@ class Config:
                 "params": {"message": "Wake word detected!"}
             },
             "autostart": False,
-            "minimize_on_close": True
+            "minimize_on_close": True,
+            # Adding explicit MFCC parameters for consistency
+            "feature_extraction": {
+                "n_mfcc": 13,
+                "n_fft": 2048,
+                "hop_length": 160
+            }
         }
         
         # Save the default configuration
@@ -107,7 +113,12 @@ class Config:
                 "params": {"message": "Wake word detected!"}
             },
             "autostart": False,
-            "minimize_on_close": True
+            "minimize_on_close": True,
+            "feature_extraction": {
+                "n_mfcc": 13,
+                "n_fft": 2048,
+                "hop_length": 160
+            }
         }
         
         # Check for missing keys and set defaults
@@ -123,6 +134,16 @@ class Config:
                 config["action"]["type"] = "notification"
             elif "params" not in config["action"]:
                 config["action"]["params"] = {"message": "Wake word detected!"}
+        
+        # Check feature extraction parameters
+        if "feature_extraction" in config:
+            if not isinstance(config["feature_extraction"], dict):
+                config["feature_extraction"] = required_keys["feature_extraction"]
+            else:
+                # Ensure all required subkeys exist
+                for subkey, default_subvalue in required_keys["feature_extraction"].items():
+                    if subkey not in config["feature_extraction"]:
+                        config["feature_extraction"][subkey] = default_subvalue
         
         # Ensure threshold is within valid range
         if "threshold" in config:

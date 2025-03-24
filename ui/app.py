@@ -303,14 +303,54 @@ class IoApp:
             Config.save(self.config)
             
             # Update the audio processor
-            self.audio_processor.update_config(self.config)
+            success = self.audio_processor.update_config(self.config)
             
             # Update UI elements
             if self.model_status:
                 model_name = Path(result["model_path"]).name
                 self.model_status.configure(text=f"Model: {model_name}")
             
-            self._log(f"New model trained and loaded: {model_name}")
+            if success:
+                self._log(f"New model trained and loaded: {model_name}")
+            else:
+                self._log(f"Model trained but could not be loaded. There may be a compatibility issue.")
+                
+                # Show error dialog
+                dialog = ctk.CTkToplevel(self.window)
+                dialog.title("Model Loading Warning")
+                dialog.geometry("400x200")
+                dialog.transient(self.window)
+                dialog.grab_set()
+                
+                # Center the dialog
+                dialog.update_idletasks()
+                width = dialog.winfo_width()
+                height = dialog.winfo_height()
+                x = (dialog.winfo_screenwidth() // 2) - (width // 2)
+                y = (dialog.winfo_screenheight() // 2) - (height // 2)
+                dialog.geometry(f"{width}x{height}+{x}+{y}")
+                
+                ctk.CTkLabel(
+                    dialog, 
+                    text="Model Loading Warning",
+                    font=ctk.CTkFont(size=16, weight="bold"),
+                    text_color="#FFAA00"
+                ).pack(pady=(20, 10))
+                
+                ctk.CTkLabel(
+                    dialog, 
+                    text="The model was trained successfully but could not be loaded.\n"
+                         "This may be due to a compatibility issue with the model architecture.\n\n"
+                         "Try training a new model or check the logs for more details."
+                ).pack(pady=10, padx=20)
+                
+                ctk.CTkButton(
+                    dialog, 
+                    text="OK",
+                    command=dialog.destroy,
+                    fg_color="#00AAAA",
+                    hover_color="#008888"
+                ).pack(pady=(10, 20))
     
     def _minimize_to_tray(self):
         """Minimize the application to system tray"""
