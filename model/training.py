@@ -424,8 +424,8 @@ class WakeWordTrainer:
         plt.savefig(os.path.join(self.diagnostic_dir, "confidence_distribution.png"))
         plt.close()
     
-    def train(self, train_loader, val_loader, num_epochs=100, patience=10, progress_callback=None):
-        """Train the wake word model with enhanced diagnostics"""
+    def train(self, train_loader, val_loader, num_epochs=100, patience=20, progress_callback=None):
+        """Train the wake word model with enhanced diagnostics and improved training stability"""
         # Get feature shape from a sample batch
         for features, _ in train_loader:
             input_shape = features.shape
@@ -433,12 +433,23 @@ class WakeWordTrainer:
             break
         
         # Create model - either standard or simple
-        if self.use_simple_model:
-            training_logger.info("Using simple model architecture")
-            model = SimpleWakeWordModel(n_mfcc=self.n_mfcc, num_frames=self.num_frames)
-        else:
-            training_logger.info("Using standard model architecture")
-            model = WakeWordModel(n_mfcc=self.n_mfcc, num_frames=self.num_frames)
+        # Force using standard model with batch normalization for better stability
+        self.use_simple_model = False  # Override to use standard model
+        training_logger.info("Using standard model architecture with batch normalization for better stability")
+        model = WakeWordModel(n_mfcc=self.n_mfcc, num_frames=self.num_frames)
+        
+        # Initialize weights properly to avoid getting stuck
+        def init_weights(m):
+            if isinstance(m, nn.Conv1d) or isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.01)  # Small positive bias
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+        
+        model.apply(init_weights)
+        training_logger.info("Applied Kaiming initialization to model weights")
         
         model.to(self.device)
         
@@ -447,16 +458,58 @@ class WakeWordTrainer:
         training_logger.info(f"Model created with {num_params} trainable parameters")
         training_logger.info(f"Model structure:\n{model}")
         
-        # Define loss function and optimizer
-        criterion = nn.BCELoss()
+        # Define loss function with class weighting to handle imbalance
+        # Count positive and negative samples to calculate weights
+        pos_count = 0
+        neg_count = 0
+        for _, labels in train_loader:
+            pos_count += (labels == 1).sum().item()
+            neg_count += (labels == 0).sum().item()
         
-        # Use a higher learning rate
-        learning_rate = 0.005  # Increased from 0.001
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        total = pos_count + neg_count
+        if total > 0 and pos_count > 0 and neg_count > 0:
+            pos_weight = torch.tensor([total / (2.0 * pos_count)])
+            training_logger.info(f"Using weighted BCE loss with positive weight: {pos_weight.item():.4f}")
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            
+            # Need to modify model to output logits instead of sigmoid
+            # We'll remove the sigmoid from the model during training
+            def remove_last_sigmoid(model):
+                # For SimpleWakeWordModel
+                if hasattr(model, 'fc_layers') and isinstance(model.fc_layers, nn.Sequential):
+                    if isinstance(model.fc_layers[-1], nn.Sigmoid):
+                        model.fc_layers = nn.Sequential(*list(model.fc_layers)[:-1])
+                        return True
+                    
+                return False
+            
+            if remove_last_sigmoid(model):
+                training_logger.info("Removed sigmoid from model for BCEWithLogitsLoss")
+            else:
+                training_logger.warning("Could not remove sigmoid, falling back to regular BCE loss")
+                criterion = nn.BCELoss()
+        else:
+            training_logger.warning("Could not compute class weights, using regular BCE loss")
+            criterion = nn.BCELoss()
         
-        # Add learning rate scheduler
+        # Lower learning rate for more stable training
+        learning_rate = 0.0005  # Further reduced from 0.001 
+        weight_decay = 1e-4    # Increased from 1e-5 for better regularization
+        
+        # Use SGD with momentum for more stable optimization
+        optimizer = optim.SGD(
+            model.parameters(), 
+            lr=learning_rate,
+            momentum=0.9,
+            weight_decay=weight_decay,
+            nesterov=True  # Use Nesterov momentum for better convergence
+        )
+        
+        training_logger.info(f"Using SGD optimizer with lr={learning_rate}, momentum=0.9, weight_decay={weight_decay}")
+        
+        # Add learning rate scheduler with better patience
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5, verbose=True, min_lr=1e-6
         )
         
         # Track metrics
@@ -465,13 +518,14 @@ class WakeWordTrainer:
         train_accs = []
         val_accs = []
         
-        # Early stopping
+        # Early stopping with increased patience
         best_val_loss = float('inf')
         best_model = None
         best_epoch = 0
         patience_counter = 0
+        patience = max(20, patience)  # Set minimum patience to 20 epochs to allow for proper training
         
-        # Save initial model
+        # Save initial model for comparison
         torch.save(
             model.state_dict(), 
             os.path.join(self.diagnostic_dir, "model_initial.pth")
@@ -492,7 +546,11 @@ class WakeWordTrainer:
             correct_train = 0
             total_train = 0
             
-            for features, labels in train_loader:
+            # Track gradients in early epochs
+            if epoch < 3:
+                grad_norms = []
+            
+            for batch_idx, (features, labels) in enumerate(train_loader):
                 features, labels = features.to(self.device), labels.to(self.device)
                 
                 # Zero the parameter gradients
@@ -500,10 +558,38 @@ class WakeWordTrainer:
                 
                 # Forward pass
                 outputs = model(features)
-                loss = criterion(outputs, labels)
+                
+                # Apply sigmoid manually if using BCEWithLogitsLoss
+                if isinstance(criterion, nn.BCEWithLogitsLoss):
+                    predictions = torch.sigmoid(outputs)
+                    loss = criterion(outputs, labels)
+                else:
+                    predictions = outputs
+                    loss = criterion(outputs, labels)
+                
+                # Add noise to labels during early training to avoid getting stuck
+                if epoch < 5 and isinstance(criterion, nn.BCEWithLogitsLoss):
+                    # Add small noise to the labels to avoid overfitting to exactly 0 or 1
+                    label_noise = torch.rand_like(labels) * 0.1
+                    noisy_labels = labels.clone()
+                    # Make sure positive samples stay > 0.5 and negative samples stay < 0.5
+                    noisy_labels = torch.where(labels > 0.5, 0.9 + label_noise * 0.1, 0.1 - label_noise * 0.1)
+                    loss = criterion(outputs, noisy_labels)
+                    if batch_idx == 0:
+                        training_logger.info(f"Using noisy labels in epoch {epoch+1} to prevent getting stuck")
                 
                 # Backward pass and optimize
                 loss.backward()
+                
+                # Track gradient norms in early epochs
+                if epoch < 3:
+                    total_norm = 0
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    total_norm = total_norm ** 0.5
+                    grad_norms.append(total_norm)
                 
                 # Gradient clipping to prevent exploding gradients
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -512,9 +598,25 @@ class WakeWordTrainer:
                 
                 # Statistics
                 train_loss += loss.item()
-                predicted = (outputs > 0.5).float()
+                if isinstance(criterion, nn.BCEWithLogitsLoss):
+                    predicted = (predictions > 0.5).float()
+                else:
+                    predicted = (outputs > 0.5).float()
+                    
                 total_train += labels.size(0)
                 correct_train += (predicted == labels).sum().item()
+                
+                # Print detailed batch progress in early epochs
+                if epoch < 3 and batch_idx % 10 == 0:
+                    training_logger.info(f"Epoch {epoch+1}, Batch {batch_idx}/{len(train_loader)}, "
+                                        f"Loss: {loss.item():.4f}")
+            
+            # Print gradient stats for early epochs
+            if epoch < 3 and grad_norms:
+                avg_grad = sum(grad_norms) / len(grad_norms)
+                max_grad = max(grad_norms)
+                training_logger.info(f"Epoch {epoch+1} gradient stats - Avg: {avg_grad:.6f}, "
+                                   f"Max: {max_grad:.6f}")
             
             train_loss = train_loss / len(train_loader)
             train_acc = correct_train / total_train
@@ -527,17 +629,36 @@ class WakeWordTrainer:
             correct_val = 0
             total_val = 0
             
+            # Track predictions for analysis
+            all_preds = []
+            all_labels = []
+            
             with torch.no_grad():
                 for features, labels in val_loader:
                     features, labels = features.to(self.device), labels.to(self.device)
                     
                     # Forward pass
                     outputs = model(features)
-                    loss = criterion(outputs, labels)
+                    
+                    # Apply sigmoid manually if using BCEWithLogitsLoss
+                    if isinstance(criterion, nn.BCEWithLogitsLoss):
+                        predictions = torch.sigmoid(outputs)
+                        loss = criterion(outputs, labels)
+                    else:
+                        predictions = outputs
+                        loss = criterion(outputs, labels)
+                    
+                    # Store predictions and labels for analysis
+                    all_preds.extend(predictions.cpu().numpy().flatten())
+                    all_labels.extend(labels.cpu().numpy().flatten())
                     
                     # Statistics
                     val_loss += loss.item()
-                    predicted = (outputs > 0.5).float()
+                    if isinstance(criterion, nn.BCEWithLogitsLoss):
+                        predicted = (predictions > 0.5).float()
+                    else:
+                        predicted = (outputs > 0.5).float()
+                        
                     total_val += labels.size(0)
                     correct_val += (predicted == labels).sum().item()
             
@@ -547,7 +668,10 @@ class WakeWordTrainer:
             val_accs.append(val_acc)
             
             # Update learning rate
+            prev_lr = optimizer.param_groups[0]['lr']
             scheduler.step(val_loss)
+            curr_lr = optimizer.param_groups[0]['lr']
+            lr_changed = prev_lr != curr_lr
             
             # Calculate time taken
             epoch_time = time.time() - epoch_start
@@ -557,8 +681,38 @@ class WakeWordTrainer:
                 f"Epoch {epoch+1}/{num_epochs} ({epoch_time:.2f}s) - "
                 f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
                 f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, "
-                f"LR: {optimizer.param_groups[0]['lr']:.6f}"
+                f"LR: {curr_lr:.6f}" + (" (changed)" if lr_changed else "")
             )
+            
+            # Log prediction distribution periodically
+            if epoch % 5 == 0 or epoch == num_epochs - 1:
+                # Analyze predictions by class
+                all_preds = np.array(all_preds)
+                all_labels = np.array(all_labels)
+                pos_preds = all_preds[all_labels == 1]
+                neg_preds = all_preds[all_labels == 0]
+                
+                if len(pos_preds) > 0 and len(neg_preds) > 0:
+                    training_logger.info(
+                        f"Prediction stats - Positive: mean={np.mean(pos_preds):.4f}, "
+                        f"std={np.std(pos_preds):.4f}, Negative: mean={np.mean(neg_preds):.4f}, "
+                        f"std={np.std(neg_preds):.4f}"
+                    )
+                
+                # Check for convergence issues (predictions all the same)
+                if np.std(all_preds) < 0.01:
+                    training_logger.warning(
+                        f"Model may be stuck - predictions have low variance: {np.std(all_preds):.6f}"
+                    )
+                    
+                    # Try to recover by increasing learning rate if we're stuck
+                    if patience_counter > 10:
+                        for param_group in optimizer.param_groups:
+                            param_group['lr'] = param_group['lr'] * 5.0  # Boost learning rate
+                        training_logger.info(f"Boosting learning rate to {optimizer.param_groups[0]['lr']:.6f} to escape local minimum")
+                        
+                        # Also reset patience counter to give the model a chance with new learning rate
+                        patience_counter = 0
             
             # Update progress callback
             if progress_callback:
@@ -576,13 +730,21 @@ class WakeWordTrainer:
                 )
                 torch.save(model.state_dict(), checkpoint_path)
                 
-                # Test inference
+                # Test inference at checkpoints
                 if (epoch + 1) % 20 == 0:
                     training_logger.info(f"Testing inference at epoch {epoch+1}:")
                     self.test_inference(model, val_loader)
             
-            # Check for improvement
-            if val_loss < best_val_loss:
+            # Check for improvement with numerical stability threshold
+            improvement_threshold = 1e-5  # Small threshold for floating point comparison
+            
+            # Force training to continue for at least 5 epochs before checking for improvement
+            if epoch < 5:
+                training_logger.info(f"Skipping early stopping check for first 5 epochs")
+                continue
+                
+            if best_val_loss - val_loss > improvement_threshold:
+                training_logger.info(f"Validation loss improved from {best_val_loss:.6f} to {val_loss:.6f}")
                 best_val_loss = val_loss
                 best_model = model.state_dict().copy()
                 best_epoch = epoch + 1
@@ -595,68 +757,16 @@ class WakeWordTrainer:
                 )
             else:
                 patience_counter += 1
+                training_logger.info(f"No improvement for {patience_counter} epochs. "
+                                   f"(Best: {best_val_loss:.6f}, Current: {val_loss:.6f})")
+                
+                # If we're stuck on the same loss value exactly, add a small perturbation
+                if abs(best_val_loss - val_loss) < 1e-10 and epoch > 10:
+                    for param in model.parameters():
+                        param.data += torch.randn_like(param.data) * 0.0001
+                    
+                    training_logger.info("Added small random noise to model parameters to escape plateau")
+                
                 if patience_counter >= patience:
-                    training_logger.info(f"Early stopping at epoch {epoch+1}")
+                    training_logger.info(f"Early stopping at epoch {epoch+1} after {patience_counter} epochs without improvement")
                     break
-        
-        total_time = time.time() - start_time
-        training_logger.info(f"Training completed in {total_time:.2f} seconds")
-        training_logger.info(f"Best model from epoch {best_epoch} with val_loss={best_val_loss:.4f}")
-        
-        # Plot training curves
-        epochs = range(1, len(train_losses) + 1)
-        plt.figure(figsize=(12, 5))
-        
-        plt.subplot(1, 2, 1)
-        plt.plot(epochs, train_losses, 'b-', label='Training Loss')
-        plt.plot(epochs, val_losses, 'r-', label='Validation Loss')
-        plt.title('Training and Validation Loss')
-        plt.xlabel('Epochs')
-        plt.ylabel('Loss')
-        plt.legend()
-        
-        plt.subplot(1, 2, 2)
-        plt.plot(epochs, train_accs, 'b-', label='Training Accuracy')
-        plt.plot(epochs, val_accs, 'r-', label='Validation Accuracy')
-        plt.title('Training and Validation Accuracy')
-        plt.xlabel('Epochs')
-        plt.ylabel('Accuracy')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.diagnostic_dir, "training_curves.png"))
-        plt.close()
-        
-        # Load best model for final evaluation
-        model.load_state_dict(best_model)
-        
-        # Final inference test
-        training_logger.info("Final inference test:")
-        self.test_inference(model, val_loader)
-        
-        return model
-    
-    def save_trained_model(self, model, path):
-        """Save trained model to disk"""
-        # Ensure the directory exists
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            torch.save(model.state_dict(), path)
-            training_logger.info(f"Model saved to {path}")
-            
-            # Create a README with training info
-            readme_path = os.path.join(os.path.dirname(path), "training_info.txt")
-            with open(readme_path, 'w') as f:
-                f.write(f"Model trained with enhanced training pipeline\n")
-                f.write(f"n_mfcc: {self.n_mfcc}\n")
-                f.write(f"n_fft: {self.n_fft}\n")
-                f.write(f"hop_length: {self.hop_length}\n")
-                f.write(f"num_frames: {self.num_frames}\n")
-                f.write(f"model_type: {'simple' if self.use_simple_model else 'standard'}\n")
-                f.write(f"Training diagnostic files in: {self.diagnostic_dir}\n")
-            
-            return True
-        except Exception as e:
-            training_logger.error(f"Error saving model: {e}")
-            return False

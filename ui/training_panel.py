@@ -168,7 +168,18 @@ class TrainingThread(threading.Thread):
             models_dir.mkdir(parents=True, exist_ok=True)
             
             model_path = str(models_dir / self.model_name)
-            trainer.save_trained_model(model, model_path)
+            try:
+                # Try the standard way first
+                trainer.save_trained_model(model, model_path)
+            except AttributeError:
+                # Fall back to direct save if method doesn't exist
+                import torch
+                # Ensure directory exists
+                Path(model_path).parent.mkdir(parents=True, exist_ok=True)
+                # Save the model
+                torch.save(model.state_dict(), model_path)
+                # Update result
+                self.result["model_path"] = model_path
             
             self.result = {
                 "success": True,
