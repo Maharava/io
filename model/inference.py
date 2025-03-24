@@ -8,11 +8,13 @@ import collections
 import threading
 from .architecture import load_model
 
-logger = logging.getLogger("WakeWord.Inference")
+logger = logging.getLogger("Io.Model.Inference")
 
 class WakeWordDetector:
-    def __init__(self, model_path, threshold=0.85, window_size=3):
-        """Real-time wake word detector"""
+    """Real-time wake word detector with confidence smoothing"""
+    
+    def __init__(self, model_path=None, threshold=0.85, window_size=3):
+        """Initialize detector with given model and parameters"""
         self.model_path = model_path
         self.threshold = threshold
         self.window_size = window_size
@@ -22,6 +24,9 @@ class WakeWordDetector:
         
         # Thread safety
         self.lock = threading.Lock()
+        
+        # Detection callback for testing
+        self.test_callback = None
         
         # Load the model
         self.model = None
@@ -56,6 +61,14 @@ class WakeWordDetector:
             self.threshold = max(0.0, min(1.0, threshold))
         logger.info(f"Detection threshold set to {self.threshold}")
     
+    def register_test_callback(self, callback):
+        """Register callback for testing detection"""
+        self.test_callback = callback
+    
+    def unregister_test_callback(self):
+        """Unregister test callback"""
+        self.test_callback = None
+    
     def detect(self, features):
         """Detect wake word in audio features"""
         # First check if model is loaded
@@ -85,8 +98,8 @@ class WakeWordDetector:
             with self.lock:
                 self.recent_predictions.append(confidence)
                 
-                # Apply smoothing by averaging recent predictions
-                recent_preds = list(self.recent_predictions)  # Make a copy inside the lock
+                # Make a copy inside the lock to avoid race conditions
+                recent_preds = list(self.recent_predictions)
             
             # Process predictions
             avg_confidence = sum(recent_preds) / len(recent_preds)
@@ -96,6 +109,10 @@ class WakeWordDetector:
             high_confidence_count = sum(1 for p in recent_preds if p > current_threshold)
             is_detected = (avg_confidence > current_threshold and 
                           high_confidence_count >= min(3, len(recent_preds)))
+            
+            # Call test callback if registered
+            if is_detected and self.test_callback:
+                self.test_callback(avg_confidence)
             
             return is_detected, avg_confidence
             

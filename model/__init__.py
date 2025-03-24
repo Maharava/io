@@ -1,3 +1,3 @@
 """
-Neural network model components for wake word detection
+Neural network model components for Io wake word detection
 """

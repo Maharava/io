@@ -1,3 +1,3 @@
 """
-Audio processing modules for wake word detection
+Audio processing modules for Io wake word detection
 """

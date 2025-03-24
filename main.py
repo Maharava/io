@@ -1,30 +1,29 @@
 """
-Neptune Wake Word Detection Engine - Main Application
+Io Wake Word Detection Engine - Main Entry Point
 """
 import os
 import sys
-import json
 import logging
 import threading
 import queue
 import time
 from pathlib import Path
 
-# Update Python path to include the current directory
+# Add the parent directory to the Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Local imports
+# Local imports (absolute for direct script execution)
 from audio.capture import AudioCapture
 from audio.features import FeatureExtractor
 from model.inference import WakeWordDetector
-from utils.config import load_config, save_config, create_default_config
-from utils.actions import TriggerHandler
-from ui.tray import SystemTrayApp
+from utils.config import Config
+from utils.actions import ActionHandler
+from ui.app import IoApp
 
 # Set up logging
 def setup_logging():
     """Set up logging with proper directory creation"""
-    log_dir = Path.home() / ".neptune"
+    log_dir = Path.home() / ".io"
     log_dir.mkdir(exist_ok=True)
     
     logging.basicConfig(
@@ -32,31 +31,34 @@ def setup_logging():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_dir / "neptune.log")
+            logging.FileHandler(log_dir / "io.log")
         ]
     )
-    return logging.getLogger("Neptune")
+    return logging.getLogger("Io")
 
 logger = setup_logging()
 
 def ensure_app_directories():
-    """Create necessary application directories if they don't exist"""
-    app_dir = Path.home() / ".neptune"
+    """Create necessary application directories"""
+    app_dir = Path.home() / ".io"
     models_dir = app_dir / "models"
     config_dir = app_dir / "config"
     training_dir = app_dir / "training_data"
+    training_dir_wake = training_dir / "wake_word"
+    training_dir_neg = training_dir / "negative"
     
-    for directory in [app_dir, models_dir, config_dir, training_dir]:
+    for directory in [app_dir, models_dir, config_dir, training_dir, 
+                      training_dir_wake, training_dir_neg]:
         directory.mkdir(exist_ok=True)
     
-    # Create default config if it doesn't exist
-    config_file = config_dir / "config.json"
-    if not config_file.exists():
-        default_config = create_default_config()
-        # No need to save here as create_default_config does it
+    # Ensure config exists
+    if not (config_dir / "config.json").exists():
+        Config.create_default()
+
 
 class AudioProcessor:
-    """Thread-safe audio processing pipeline"""
+    """Audio processing pipeline for wake word detection"""
+    
     def __init__(self, config):
         """Initialize the audio processing pipeline"""
         self.config = config
@@ -64,7 +66,7 @@ class AudioProcessor:
         self.processing_thread = None
         
         # Processing queue for passing audio between threads
-        self.audio_queue = queue.Queue(maxsize=100)  # Limit queue size to prevent memory issues
+        self.audio_queue = queue.Queue(maxsize=100)
         
         # Initialize components
         self.feature_extractor = FeatureExtractor(
@@ -77,7 +79,7 @@ class AudioProcessor:
             threshold=config["threshold"]
         )
         
-        self.action_handler = TriggerHandler(
+        self.action_handler = ActionHandler(
             action_config=config["action"],
             debounce_time=config["debounce_time"]
         )
@@ -179,22 +181,30 @@ class AudioProcessor:
     
     def update_config(self, config):
         """Update configuration"""
+        restart_needed = False
+        
+        # Check if audio device changed
+        if config["audio_device"] != self.config["audio_device"]:
+            restart_needed = True
+        
+        # Update configuration
         self.config = config
         
-        # Update components with new config
+        # Update detector threshold
         self.detector.set_threshold(config["threshold"])
-        if config["model_path"] != self.config["model_path"]:
+        
+        # Update model if changed
+        if config["model_path"] != self.config.get("model_path"):
             self.detector.load_model(config["model_path"])
             
-        self.action_handler.update_config(config["action"])
-        self.action_handler.debounce_time = config["debounce_time"]
+        # Update action handler
+        self.action_handler.update_config(config["action"], config["debounce_time"])
         
-        # If audio device changed, restart audio capture
-        if config["audio_device"] != self.config["audio_device"]:
-            was_running = self.audio_capture.is_running
-            if was_running:
-                self.audio_capture.stop()
-                
+        # Restart audio capture if needed
+        if restart_needed and self.running:
+            self.stop()
+            
+            # Update audio capture
             self.audio_capture = AudioCapture(
                 device_index=config["audio_device"],
                 sample_rate=config["sample_rate"],
@@ -202,8 +212,8 @@ class AudioProcessor:
                 callback=self.enqueue_audio
             )
             
-            if was_running:
-                self.audio_capture.start()
+            self.start()
+
 
 def main():
     """Main application entry point"""
@@ -211,35 +221,19 @@ def main():
     ensure_app_directories()
     
     # Load configuration
-    config = load_config()
+    config = Config.load()
     
     # Create audio processor
     processor = AudioProcessor(config)
     
-    # Check if we should start in training mode
-    if config.get("start_in_training", False):
-        # Create a training window directly
-        training_window = TrainingWindow(config)
-        result = training_window.run()
-        
-        # If training completed successfully, update the model
-        if result and result.get('success') and 'model_path' in result:
-            config['model_path'] = result['model_path']
-            save_config(config)
-            
-            # Update the audio processor with new config
-            processor.update_config(config)
-    
-    # Start the system tray application (this will block until exit)
-    app = SystemTrayApp(
-        audio_processor=processor,
-        config=config
-    )
+    # Create and run the application
+    app = IoApp(processor)
     app.run()
     
     # Cleanup on exit
     processor.stop()
     logger.info("Application terminated")
+
 
 if __name__ == "__main__":
     main()

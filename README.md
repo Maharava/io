@@ -1,6 +1,6 @@
-# Wake Word Detection Engine
+# Io Wake Word Detection Engine
 
-A fully offline wake word detection system for Windows operating systems using a lightweight CNN architecture. The system operates entirely on the local machine without requiring internet connectivity.
+A fully offline wake word detection system using a lightweight CNN architecture. The system operates entirely on the local machine without requiring internet connectivity, making it suitable for privacy-conscious applications.
 
 ## Features
 
@@ -8,6 +8,7 @@ A fully offline wake word detection system for Windows operating systems using a
 - **Lightweight**: Low CPU and memory usage
 - **Customisable**: Train your own wake words
 - **Privacy-Focused**: Audio never leaves your device
+- **Modern UI**: Sleek, sci-fi inspired interface using CustomTkinter
 - **Configurable Actions**: Run commands, press keyboard shortcuts, or show notifications
 
 ## Installation
@@ -22,8 +23,8 @@ A fully offline wake word detection system for Windows operating systems using a
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/wakeword.git
-cd wakeword
+git clone https://github.com/yourusername/io-wake-word.git
+cd io-wake-word
 
 # Install the package
 pip install -e .
@@ -32,7 +33,7 @@ pip install -e .
 ### Run the Application
 
 ```bash
-wakeword
+io
 ```
 
 ## Quick Start Guide
@@ -40,24 +41,24 @@ wakeword
 1. **First Launch**: On first launch, you'll be prompted to select an audio input device and create a wake word model.
 
 2. **Training a Wake Word**:
-   - Click on "Training" in the system tray menu
+   - Go to the "Training" tab
    - Record at least 50 samples of your wake word (e.g., "Hey Computer")
    - Record at least 10 background noise samples (typical environment sounds)
    - Enter a name for your model and click "Start Training"
    - Training takes ~10-15 minutes depending on your hardware
 
 3. **Configuration**:
-   - Click on "Settings" in the system tray menu
+   - Go to the "Configuration" tab
    - Select your audio device and wake word model
    - Adjust detection threshold (higher = fewer false positives, but may miss actual wake words)
    - Configure what happens when the wake word is detected
 
 4. **Activation**:
-   - Click "Enable" in the system tray menu to start listening
-   - The application will run in the background and listen for your wake word
+   - On the "Dashboard" tab, click "Start Detection" to begin listening
+   - The application will listen for your wake word
    - When detected, it will perform your configured action
 
-## Directory Structure
+## Project Structure
 
 - `audio/`: Audio processing modules
   - `capture.py`: Microphone input handling
@@ -70,21 +71,21 @@ wakeword
   - `training.py`: Model training pipeline
 
 - `ui/`: User interface
-  - `tray.py`: System tray application
-  - `config.py`: Configuration window
-  - `training_ui.py`: Training interface
+  - `app.py`: Main application window
+  - `config_panel.py`: Configuration panel
+  - `training_panel.py`: Training interface
 
 - `utils/`: Utility functions
   - `config.py`: Configuration handling
   - `actions.py`: Trigger action execution
 
-## Advanced Configuration
+## Configuration
 
-The application stores configuration and models in the `~/.wakeword` directory:
+The application stores configuration and models in the `~/.io` directory:
 
-- `~/.wakeword/config/config.json`: Main configuration file
-- `~/.wakeword/models/`: Trained wake word models
-- `~/.wakeword/training_data/`: Audio samples for training
+- `~/.io/config/config.json`: Main configuration file
+- `~/.io/models/`: Trained wake word models
+- `~/.io/training_data/`: Audio samples for training
 
 ## Troubleshooting
 

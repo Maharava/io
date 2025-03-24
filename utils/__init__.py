@@ -1,3 +1,3 @@
 """
-Utility functions for wake word detection
+Utility functions for Io wake word detection
 """

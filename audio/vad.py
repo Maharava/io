@@ -4,12 +4,14 @@ Voice Activity Detection - Filters out silent audio frames
 import numpy as np
 import logging
 
-logger = logging.getLogger("WakeWord.VAD")
+logger = logging.getLogger("Io.Audio.VAD")
 
 class VoiceActivityDetector:
+    """Energy-based voice activity detector with adaptive thresholding"""
+    
     def __init__(self, sample_rate=16000, frame_duration_ms=30, 
                  threshold_energy=0.0001, threshold_zero_crossings=10):
-        """Simple energy-based voice activity detector"""
+        """Initialize voice activity detector"""
         self.sample_rate = sample_rate
         self.frame_size = int(sample_rate * frame_duration_ms / 1000)
         self.threshold_energy = threshold_energy
@@ -19,78 +21,22 @@ class VoiceActivityDetector:
         self.use_adaptive_threshold = True
         self.adaptive_energy_threshold = threshold_energy
         self.noise_level = threshold_energy
+        
+        # Sliding window for energy history
         self.energy_history = []
-        self.history_size = 50  # Keep last 50 frames for adaptation
-        self.adaptation_rate = 0.05  # Slow adaptation rate
-    
-    def is_speech(self, audio_frame):
-        """Determine if audio frame contains speech"""
-        try:
-            # Calculate frame energy
-            energy = np.mean(audio_frame**2)
-            
-            # Calculate zero crossing rate
-            zero_crossings = np.sum(np.abs(np.diff(np.signbit(audio_frame).astype(int))))
-            
-            # Update adaptive threshold if enabled
-            if self.use_adaptive_threshold:
-                self._update_adaptive_threshold(energy)
-                threshold_to_use = self.adaptive_energy_threshold
-            else:
-                threshold_to_use = self.threshold_energy
-            
-            # Consider it speech if both energy and zero crossings are above thresholds
-            is_speech = (energy > threshold_to_use and 
-                        zero_crossings > self.threshold_zero_crossings)
-            
-            return is_speech
-        except Exception as e:
-            logger.error(f"Error in VAD processing: {e}")
-            # Default to returning True to avoid missing potential speech
-            return True
-    
-    def _update_adaptive_threshold(self, current_energy):
-        """Update adaptive energy threshold based on recent audio"""
-        # Add current energy to history
-        self.energy_history.append(current_energy)
+        self.history_size = 100
         
-        # Keep history size limited
-        if len(self.energy_history) > self.history_size:
-            self.energy_history.pop(0)
-        
-        # Calculate noise level from the lowest 20% of energies
-        if len(self.energy_history) >= 5:
-            sorted_energies = sorted(self.energy_history)
-            noise_count = max(1, int(len(sorted_energies) * 0.2))
-            recent_noise_level = sum(sorted_energies[:noise_count]) / noise_count
-            
-            # Smoothly update noise level
-            self.noise_level = ((1 - self.adaptation_rate) * self.noise_level + 
-                               self.adaptation_rate * recent_noise_level)
-            
-            # Set adaptive threshold as a multiple of noise level with a minimum
-            self.adaptive_energy_threshold = max(self.threshold_energy, 
-                                               self.noise_level * 3.0)
-
-class ImprovedVoiceActivityDetector(VoiceActivityDetector):
-    """Advanced VAD with better noise handling"""
-    def __init__(self, sample_rate=16000, frame_duration_ms=30):
-        super().__init__(sample_rate, frame_duration_ms)
-        
-        # Enhanced parameters
-        self.use_adaptive_threshold = True
-        self.energy_history_size = 100
-        self.energy_history = []
+        # State machine for smoother transitions
         self.speech_mode = False
         self.speech_frame_count = 0
         self.silence_frame_count = 0
         
-        # Hangover for smoother transitions
-        self.speech_hangover = 8  # Continue detecting speech for this many frames after energy drops
-        self.silence_hangover = 3  # Wait this many frames of silence before switching modes
+        # Hangover counters for smoother detection
+        self.speech_hangover = 8  # Continue speech detection after energy drops
+        self.silence_hangover = 3  # Wait frames before switching to silence
     
     def is_speech(self, audio_frame):
-        """Improved speech detection with hangover"""
+        """Determine if audio frame contains speech"""
         try:
             # Calculate frame energy
             energy = np.mean(audio_frame**2)
@@ -142,16 +88,16 @@ class ImprovedVoiceActivityDetector(VoiceActivityDetector):
                     return False
                     
         except Exception as e:
-            logger.error(f"Error in improved VAD processing: {e}")
-            return True  # Default to speech on error
+            logger.error(f"Error in VAD processing: {e}")
+            return True  # Default to speech on error to avoid missing potential wake words
     
     def _update_adaptive_threshold(self, current_energy):
-        """Enhanced adaptive threshold with better noise estimation"""
+        """Update adaptive threshold based on recent audio levels"""
         # Add current energy to history
         self.energy_history.append(current_energy)
         
         # Keep history size limited
-        if len(self.energy_history) > self.energy_history_size:
+        if len(self.energy_history) > self.history_size:
             self.energy_history.pop(0)
         
         # Need enough history for reliable estimation

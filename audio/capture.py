@@ -6,12 +6,16 @@ import pyaudio
 import threading
 import collections
 import logging
+import wave
 import time
+
 from .vad import VoiceActivityDetector
 
-logger = logging.getLogger("WakeWord.Audio")
+logger = logging.getLogger("Io.Audio")
 
 class AudioCapture:
+    """Thread-safe audio capture with PyAudio"""
+    
     def __init__(self, device_index=None, sample_rate=16000, frame_size=512, callback=None):
         """Initialize audio capture with PyAudio"""
         self.device_index = device_index
@@ -31,6 +35,9 @@ class AudioCapture:
         
         # Lock for thread safety
         self.lock = threading.Lock()
+        
+        # Keep track of audio levels for visualization
+        self.current_audio_level = 0.0
     
     def list_devices(self):
         """List available audio input devices"""
@@ -45,7 +52,7 @@ class AudioCapture:
                         "index": i,
                         "name": device_info["name"],
                         "channels": device_info["maxInputChannels"],
-                        "sample_rate": device_info["defaultSampleRate"]
+                        "sample_rate": int(device_info["defaultSampleRate"])
                     })
             
             p.terminate()
@@ -65,6 +72,9 @@ class AudioCapture:
             
             # Normalize to [-1.0, 1.0]
             audio_data = audio_data / 32768.0
+            
+            # Calculate audio level for visualization
+            self.current_audio_level = float(np.abs(audio_data).mean())
             
             # Apply automatic gain control (simple normalization)
             if np.abs(audio_data).max() > 0:
@@ -114,7 +124,7 @@ class AudioCapture:
             )
             
             self.is_running = True
-            logger.info("Audio capture started")
+            logger.info(f"Audio capture started on device {self.device_index}")
         except Exception as e:
             logger.error(f"Error starting audio capture: {e}")
             self._cleanup_resources()
@@ -154,6 +164,66 @@ class AudioCapture:
                 return np.concatenate(list(self.buffer))
             else:
                 return np.array([], dtype=np.float32)
+    
+    def get_audio_level(self, device_index=None):
+        """Get current audio level (for visualization)"""
+        if device_index is not None and device_index != self.device_index:
+            # If we're checking a different device, return random data for now
+            # In a real implementation, we'd use PyAudio to check the device
+            import random
+            return random.uniform(0.0, 0.3)
+        
+        return self.current_audio_level
+    
+    def save_sample(self, filename, duration=3):
+        """Record a sample to a WAV file for testing"""
+        if self.is_running:
+            logger.warning("Cannot save sample while capture is running")
+            return False
+        
+        p = None
+        stream = None
+        
+        try:
+            p = pyaudio.PyAudio()
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.sample_rate,
+                input=True,
+                input_device_index=self.device_index,
+                frames_per_buffer=self.frame_size
+            )
+            
+            logger.info(f"Recording {duration} second sample to {filename}")
+            
+            frames = []
+            for i in range(0, int(self.sample_rate / self.frame_size * duration)):
+                data = stream.read(self.frame_size)
+                frames.append(data)
+            
+            logger.info("Finished recording")
+            
+            # Save to WAV file
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(p.get_sample_format_size(pyaudio.paInt16))
+                wf.setframerate(self.sample_rate)
+                wf.writeframes(b''.join(frames))
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error saving audio sample: {e}")
+            return False
+        
+        finally:
+            if stream:
+                stream.stop_stream()
+                stream.close()
+            
+            if p:
+                p.terminate()
     
     def __del__(self):
         """Destructor to ensure resources are released"""

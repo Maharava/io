@@ -5,61 +5,55 @@ import numpy as np
 import librosa
 import logging
 
-logger = logging.getLogger("WakeWord.Features")
+logger = logging.getLogger("Io.Audio.Features")
 
 class FeatureExtractor:
+    """Extract MFCC features from audio frames for wake word detection"""
+    
     def __init__(self, sample_rate=16000, frame_size=512, 
                  n_mfcc=13, n_fft=2048, hop_length=160):
-        """
-        Extract MFCC features from audio frames
-        
-        Args:
-            sample_rate: Audio sample rate in Hz
-            frame_size: Number of samples per audio frame
-            n_mfcc: Number of MFCC coefficients to extract
-            n_fft: FFT window size
-            hop_length: Hop length for feature extraction (10ms at 16kHz)
-        """
+        """Initialize feature extractor with given parameters"""
         self.sample_rate = sample_rate
         self.frame_size = frame_size
         self.n_mfcc = n_mfcc
         self.n_fft = n_fft
         self.hop_length = hop_length
         
-        # Feature normalization parameters (will be updated during use)
+        # Feature normalization parameters (updated during use)
         self.mean = np.zeros(n_mfcc)
         self.std = np.ones(n_mfcc)
+        
+        # Feature cache for frequently used audio
         self.feature_cache = {}
+        self.max_cache_size = 100
         
         # Number of frames to generate 1 second of context (101 frames)
         self.num_frames = 101
         
-        # Running buffer for context
+        # Running buffer for audio context
         self.audio_buffer = np.zeros(0)
     
     def extract(self, audio_frame):
-        """
-        Extract MFCC features from audio frame
-        
-        Args:
-            audio_frame: Numpy array of audio samples
-            
-        Returns:
-            numpy.ndarray: MFCC features of shape [1, n_mfcc, num_frames]
-                          or None if not enough audio context yet
-        """
+        """Extract MFCC features from audio frame"""
         # Add current frame to buffer
         self.audio_buffer = np.append(self.audio_buffer, audio_frame)
         
-        # We need at least 1 second of audio (plus a bit more for processing)
+        # We need at least 1 second of audio
         min_samples = self.sample_rate + self.frame_size
         
         if len(self.audio_buffer) < min_samples:
             return None
         
-        # Keep only the most recent audio (1 second plus some margin)
+        # Keep only the most recent audio (1 second plus margin)
         if len(self.audio_buffer) > min_samples * 1.2:
             self.audio_buffer = self.audio_buffer[-min_samples:]
+        
+        # Calculate buffer hash for cache lookup
+        buffer_hash = hash(self.audio_buffer.tobytes())
+        
+        # Check cache first
+        if buffer_hash in self.feature_cache:
+            return self.feature_cache[buffer_hash]
         
         # Extract MFCCs
         try:
@@ -92,11 +86,32 @@ class FeatureExtractor:
             self.std = (1 - alpha) * self.std + alpha * current_std
             
             # Reshape for the model [batch, channels, mfcc, time]
-            # For our CNN: [1, 1, n_mfcc, num_frames]
             mfccs = np.expand_dims(mfccs, axis=0)
+            
+            # Cache the result
+            self._update_cache(buffer_hash, mfccs)
             
             return mfccs
             
         except Exception as e:
             logger.error(f"Error extracting features: {e}")
             return None
+    
+    def _update_cache(self, key, value):
+        """Update feature cache with size limit"""
+        # Add to cache
+        self.feature_cache[key] = value
+        
+        # Remove oldest items if cache is too large
+        if len(self.feature_cache) > self.max_cache_size:
+            # Get oldest items (first items in the cache)
+            oldest_key = next(iter(self.feature_cache))
+            del self.feature_cache[oldest_key]
+    
+    def clear_buffer(self):
+        """Clear the audio buffer"""
+        self.audio_buffer = np.zeros(0)
+    
+    def clear_cache(self):
+        """Clear the feature cache"""
+        self.feature_cache.clear()

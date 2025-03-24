@@ -1,5 +1,5 @@
 """
-Neptune Wake Word Detection Engine Package
+Io Wake Word Detection Engine Package
 A fully offline wake word detection system using a lightweight CNN architecture
 """
 

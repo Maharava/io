@@ -13,11 +13,13 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from .architecture import create_model, save_model
 
-logger = logging.getLogger("WakeWord.Training")
+logger = logging.getLogger("Io.Model.Training")
 
 class WakeWordDataset(Dataset):
+    """Dataset for wake word training"""
+    
     def __init__(self, features, labels):
-        """Dataset for wake word training"""
+        """Initialize dataset with features and labels"""
         self.features = features
         self.labels = labels
     
@@ -29,21 +31,25 @@ class WakeWordDataset(Dataset):
         label = torch.tensor([self.labels[idx]]).float()
         return feature, label
 
+
 class WakeWordTrainer:
+    """Trainer for wake word models"""
+    
     def __init__(self, sample_rate=16000, n_mfcc=13, n_fft=2048, 
                  hop_length=160, num_frames=101):
-        """Trainer for wake word models"""
+        """Initialize trainer with given parameters"""
         self.sample_rate = sample_rate
         self.n_mfcc = n_mfcc
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.num_frames = num_frames
         
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Use CPU for better compatibility
+        self.device = torch.device("cpu")
         logger.info(f"Using device: {self.device}")
     
     def extract_features(self, audio_files, augment=False):
-        """Extract MFCC features from audio files"""
+        """Extract MFCC features from audio files with optional augmentation"""
         features = []
         
         for file_path in audio_files:
@@ -52,10 +58,8 @@ class WakeWordTrainer:
                 y, sr = librosa.load(file_path, sr=self.sample_rate)
                 
                 # Basic data augmentations if requested
+                versions = [y]
                 if augment:
-                    # Create 3 versions: original, pitch shift, time stretch
-                    versions = [y]
-                    
                     # Pitch shift (up and down)
                     y_pitch_up = librosa.effects.pitch_shift(y, sr=sr, n_steps=1)
                     y_pitch_down = librosa.effects.pitch_shift(y, sr=sr, n_steps=-1)
@@ -70,8 +74,6 @@ class WakeWordTrainer:
                     y_louder = y * 1.2
                     y_softer = y * 0.8
                     versions.extend([y_louder, y_softer])
-                else:
-                    versions = [y]
                 
                 # Process each version
                 for audio in versions:

@@ -1,3 +1,3 @@
 """
-User interface components for wake word detection
+User interface components for Io wake word detection
 """
