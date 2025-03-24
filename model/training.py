@@ -8,12 +8,89 @@ import torch.optim as optim
 import numpy as np
 import librosa
 import logging
+import math
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from .architecture import create_model, save_model
 
 logger = logging.getLogger("Io.Model.Training")
+
+# Define the model architecture directly in this file to ensure consistency
+class WakeWordModel(nn.Module):
+    """1D CNN model for wake word detection"""
+    
+    def __init__(self, n_mfcc=13, num_frames=101):
+        """Initialize the model with given parameters"""
+        super(WakeWordModel, self).__init__()
+        
+        # Simplified architecture with clear dimensions tracking
+        self.conv_layers = nn.Sequential(
+            # First conv block - using n_mfcc as input channels
+            nn.Conv1d(n_mfcc, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2),
+            
+            # Second conv block
+            nn.Conv1d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2)
+        )
+        
+        # Calculate output size of conv layers for FC layer
+        # Input: [batch, n_mfcc, num_frames]
+        # After first MaxPool: frame_count is approximately ceil(num_frames/2)
+        # After second MaxPool: frame_count is approximately ceil(ceil(num_frames/2)/2)
+        frame_count_after_first = math.ceil(num_frames / 2)
+        frame_count_after_second = math.ceil(frame_count_after_first / 2)
+        fc_input_size = 64 * frame_count_after_second
+        
+        logger.info(f"FC input size calculated as: {fc_input_size}")
+        
+        # Fully connected layers
+        self.fc_layers = nn.Sequential(
+            nn.Linear(fc_input_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        """Forward pass through the model"""
+        # Apply conv layers and capture intermediate shape
+        x = self.conv_layers(x)
+        
+        # Log the actual shape before flattening (helps with debugging)
+        batch_size, channels, width = x.shape
+        logger.info(f"Shape before flattening: {x.shape}, flattened size: {channels * width}")
+        
+        # Flatten for FC layers
+        x = x.view(x.size(0), -1)
+        
+        # Apply FC layers
+        x = self.fc_layers(x)
+        
+        return x
+
+
+def create_model(n_mfcc=13, num_frames=101):
+    """Create a new wake word model"""
+    return WakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
+
+def save_model(model, path):
+    """Save model to disk with proper resource management"""
+    try:
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        
+        # Save the model
+        torch.save(model.state_dict(), path)
+        logger.info(f"Model saved to {path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving model: {e}")
+        return False
 
 class WakeWordDataset(Dataset):
     """Dataset for wake word training"""
@@ -106,11 +183,11 @@ class WakeWordTrainer:
     def _extract_mfcc(self, audio):
         """Extract MFCC features from audio segment"""
         try:
-            # Extract MFCCs
+            # Extract MFCCs - explicitly using self.n_mfcc
             mfcc = librosa.feature.mfcc(
                 y=audio,
                 sr=self.sample_rate,
-                n_mfcc=self.n_mfcc,
+                n_mfcc=self.n_mfcc,  # This should be 13
                 n_fft=self.n_fft,
                 hop_length=self.hop_length
             )
@@ -124,6 +201,9 @@ class WakeWordTrainer:
                 # Truncate if too long
                 mfcc = mfcc[:, :self.num_frames]
             
+            # Log the MFCC shape to help with debugging
+            logger.debug(f"Extracted MFCC shape: {mfcc.shape}")
+            
             return mfcc
             
         except Exception as e:
@@ -131,42 +211,22 @@ class WakeWordTrainer:
             return None
     
     def prepare_data(self, wake_word_files, negative_files, test_size=0.2):
-        """Prepare training and validation datasets with more balanced approach"""
+        """Prepare training and validation datasets"""
         logger.info("Extracting features from wake word samples")
         wake_word_features = self.extract_features(wake_word_files, augment=True)
         
         logger.info("Extracting features from negative samples")
-        # Apply augmentation to negative samples too for better balance
-        negative_features = self.extract_features(negative_files, augment=True)
+        negative_features = self.extract_features(negative_files, augment=False)
         
         # Create labels (1 for wake word, 0 for negative)
         wake_word_labels = np.ones(len(wake_word_features))
         negative_labels = np.zeros(len(negative_features))
         
-        # Check if we need to balance the dataset
-        wake_count = len(wake_word_features)
-        neg_count = len(negative_features)
-        logger.info(f"Raw dataset: {wake_count} wake word samples, {neg_count} negative samples")
-        
-        # Balance dataset if needed - undersample the majority class
-        if wake_count > neg_count * 3:  # If wake word samples are more than 3x negative samples
-            # Randomly select wake word samples to match ratio
-            indices = np.random.choice(wake_count, size=neg_count * 3, replace=False)
-            wake_word_features = [wake_word_features[i] for i in indices]
-            wake_word_labels = np.ones(len(wake_word_features))
-            logger.info(f"Balanced dataset by reducing wake word samples to {len(wake_word_features)}")
-        elif neg_count > wake_count * 3:  # If negative samples are more than 3x wake word samples
-            # Randomly select negative samples to match ratio
-            indices = np.random.choice(neg_count, size=wake_count * 3, replace=False)
-            negative_features = [negative_features[i] for i in indices]
-            negative_labels = np.zeros(len(negative_features))
-            logger.info(f"Balanced dataset by reducing negative samples to {len(negative_features)}")
-        
         # Combine features and labels
         features = wake_word_features + negative_features
         labels = np.concatenate([wake_word_labels, negative_labels])
         
-        # Split into train/validation sets with stratification
+        # Split into train/validation sets
         features_train, features_val, labels_train, labels_val = train_test_split(
             features, labels, test_size=test_size, stratify=labels, random_state=42
         )
@@ -183,44 +243,41 @@ class WakeWordTrainer:
             val_dataset, batch_size=32, shuffle=False, drop_last=False
         )
         
+        # Get feature dimensions for debugging
+        if len(features) > 0:
+            sample_feature = features[0]
+            logger.info(f"Sample feature shape: {sample_feature.shape}")
+        
         logger.info(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
         return train_loader, val_loader
-
+    
     def train(self, train_loader, val_loader, num_epochs=50, patience=5, progress_callback=None):
-        """Train the wake word model with improved regularization"""
-        # Create model and move to device
-        model = create_model(n_mfcc=self.n_mfcc * 2, num_frames=self.num_frames)  # Account for delta features
+        """Train the wake word model"""
+        # Sample the first batch to get feature dimensions
+        for features, _ in train_loader:
+            logger.info(f"Actual input shape: {features.shape}")
+            break
+            
+        # Create model and move to device - using our local create_model
+        model = create_model(n_mfcc=self.n_mfcc, num_frames=self.num_frames)
         model.to(self.device)
         
-        # Define loss function with weighting for better balance
-        # This helps particularly if classes are still somewhat imbalanced
-        pos_weight = torch.tensor([1.0])  # Can be adjusted if needed
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        
-        # Add weight decay for L2 regularization
-        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-        
-        # Learning rate scheduler for better convergence
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=3, verbose=True
-        )
+        # Define loss function and optimizer
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
         
         # Early stopping
         best_val_loss = float('inf')
         best_model = None
         patience_counter = 0
         
-        # F1 score tracking
-        best_f1 = 0.0
-        
         # Training loop
         for epoch in range(num_epochs):
             # Training phase
             model.train()
             train_loss = 0.0
-            true_positives = 0
-            false_positives = 0
-            false_negatives = 0
+            correct_train = 0
+            total_train = 0
             
             for features, labels in train_loader:
                 features, labels = features.to(self.device), labels.to(self.device)
@@ -234,34 +291,22 @@ class WakeWordTrainer:
                 
                 # Backward pass and optimize
                 loss.backward()
-                
-                # Apply gradient clipping to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
                 optimizer.step()
                 
                 # Statistics
                 train_loss += loss.item()
-                predicted = (torch.sigmoid(outputs) > 0.5).float()
-                
-                # Calculate metrics
-                true_positives += ((predicted == 1) & (labels == 1)).sum().item()
-                false_positives += ((predicted == 1) & (labels == 0)).sum().item()
-                false_negatives += ((predicted == 0) & (labels == 1)).sum().item()
+                predicted = (outputs > 0.5).float()
+                total_train += labels.size(0)
+                correct_train += (predicted == labels).sum().item()
             
             train_loss = train_loss / len(train_loader)
-            
-            # Calculate F1 score
-            precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-            recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            train_acc = correct_train / total_train
             
             # Validation phase
             model.eval()
             val_loss = 0.0
-            val_true_positives = 0
-            val_false_positives = 0
-            val_false_negatives = 0
+            correct_val = 0
+            total_val = 0
             
             with torch.no_grad():
                 for features, labels in val_loader:
@@ -273,47 +318,33 @@ class WakeWordTrainer:
                     
                     # Statistics
                     val_loss += loss.item()
-                    predicted = (torch.sigmoid(outputs) > 0.5).float()
-                    
-                    # Calculate metrics
-                    val_true_positives += ((predicted == 1) & (labels == 1)).sum().item()
-                    val_false_positives += ((predicted == 1) & (labels == 0)).sum().item()
-                    val_false_negatives += ((predicted == 0) & (labels == 1)).sum().item()
+                    predicted = (outputs > 0.5).float()
+                    total_val += labels.size(0)
+                    correct_val += (predicted == labels).sum().item()
             
             val_loss = val_loss / len(val_loader)
-            
-            # Calculate validation F1 score
-            val_precision = val_true_positives / (val_true_positives + val_false_positives) if (val_true_positives + val_false_positives) > 0 else 0
-            val_recall = val_true_positives / (val_true_positives + val_false_negatives) if (val_true_positives + val_false_negatives) > 0 else 0
-            val_f1 = 2 * val_precision * val_recall / (val_precision + val_recall) if (val_precision + val_recall) > 0 else 0
-            
-            # Update learning rate based on validation loss
-            scheduler.step(val_loss)
+            val_acc = correct_val / total_val
             
             # Progress update
             logger.info(f"Epoch {epoch+1}/{num_epochs}, "
-                       f"Train Loss: {train_loss:.4f}, Train F1: {f1:.4f}, "
-                       f"Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}")
+                       f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+                       f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
             
             if progress_callback:
                 progress_percent = int(30 + (epoch + 1) / num_epochs * 60)
-                progress_callback(f"Training: Epoch {epoch+1}/{num_epochs}, Val F1: {val_f1:.2f}", 
+                progress_callback(f"Training: Epoch {epoch+1}/{num_epochs}, Accuracy: {val_acc:.2f}", 
                                  progress_percent)
             
             # Check for improvement
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_model = model.state_dict().copy()
-                best_f1 = val_f1
                 patience_counter = 0
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
                     logger.info(f"Early stopping at epoch {epoch+1}")
                     break
-        
-        # Log final model performance
-        logger.info(f"Training complete. Best validation F1 score: {best_f1:.4f}")
         
         # Load best model
         model.load_state_dict(best_model)
