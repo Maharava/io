@@ -10,8 +10,8 @@ import pyaudio
 import wave
 import numpy as np
 from pathlib import Path
-from ..model.training import WakeWordTrainer
-from ..utils.config import load_config, save_config
+from model.training import WakeWordTrainer
+from utils.config import load_config, save_config
 
 logger = logging.getLogger("WakeWord.UI.Training")
 
@@ -162,8 +162,12 @@ class TrainingWindow:
     
     def run(self):
         """Run the training window"""
-        # Set theme
-        sg.theme('DarkBlue')
+        try:
+            # Try newer approach first
+            sg.theme('DarkBlue')
+        except AttributeError:
+            # Fall back to older approach
+            sg.ChangeLookAndFeel('DarkBlue')
         
         # Create folder structure
         data_dir = Path.home() / ".wakeword" / "training_data"
@@ -326,6 +330,33 @@ class TrainingWindow:
                 self.window['-STATUS-'].update('Preparing for training...')
                 
                 # Start training in a separate thread
+                self.training_thread = TrainingThread(
+                    self.wake_word_files, 
+                    self.negative_files,
+                    model_name,
+                    progress_callback=self.update_training_progress
+                )
+                self.training_thread.start()
+            
+            # Check if training is complete
+            if self.training_thread and not self.training_thread.is_alive() and self.training_thread.result:
+                if self.training_thread.result.get('success', False):
+                    result = self.training_thread.result
+                    sg.popup('Training Complete', 'The wake word model has been trained successfully!')
+                    break
+                else:
+                    error = self.training_thread.result.get('error', 'Unknown error')
+                    sg.popup_error(f'Training Error: {error}')
+                    
+                    # Re-enable buttons
+                    self.window['-TRAIN-'].update(disabled=False)
+                    self.window['-RECORD_WAKE-'].update(disabled=False)
+                    self.window['-RECORD_NEG-'].update(disabled=False)
+                    self.window['-PLAY_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
+                    self.window['-DELETE_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
+                    self.window['-PLAY_NEG-'].update(disabled=len(self.negative_files) == 0)
+                    self.window['-DELETE_NEG-'].update(disabled=len(self.negative_files) == 0)
+                
                 self.training_thread = None
         
         # Close window
@@ -380,31 +411,4 @@ class TrainingWindow:
         if self.window:
             self.window['-STATUS-'].update(status_text)
             if progress_value >= 0:
-                self.window['-PROGRESS-'].update(current_count=progress_value)_thread = TrainingThread(
-                    self.wake_word_files, 
-                    self.negative_files,
-                    model_name,
-                    progress_callback=self.update_training_progress
-                )
-                self.training_thread.start()
-            
-            # Check if training is complete
-            if self.training_thread and not self.training_thread.is_alive() and self.training_thread.result:
-                if self.training_thread.result.get('success', False):
-                    result = self.training_thread.result
-                    sg.popup('Training Complete', 'The wake word model has been trained successfully!')
-                    break
-                else:
-                    error = self.training_thread.result.get('error', 'Unknown error')
-                    sg.popup_error(f'Training Error: {error}')
-                    
-                    # Re-enable buttons
-                    self.window['-TRAIN-'].update(disabled=False)
-                    self.window['-RECORD_WAKE-'].update(disabled=False)
-                    self.window['-RECORD_NEG-'].update(disabled=False)
-                    self.window['-PLAY_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
-                    self.window['-DELETE_WAKE-'].update(disabled=len(self.wake_word_files) == 0)
-                    self.window['-PLAY_NEG-'].update(disabled=len(self.negative_files) == 0)
-                    self.window['-DELETE_NEG-'].update(disabled=len(self.negative_files) == 0)
-                
-                self.training
+                self.window['-PROGRESS-'].update(current_count=progress_value)

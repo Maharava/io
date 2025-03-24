@@ -1,13 +1,13 @@
 """
-Configuration window for wake word engine
+Configuration window for Neptune wake word engine
 """
 import os
 import PySimpleGUI as sg
 import logging
 from pathlib import Path
-from ..utils.config import load_config, save_config
+from utils.config import load_config, save_config
 
-logger = logging.getLogger("WakeWord.UI.Config")
+logger = logging.getLogger("Neptune.UI.Config")
 
 class ConfigWindow:
     def __init__(self, config, audio_capture, detector):
@@ -31,15 +31,12 @@ class ConfigWindow:
         Returns:
             dict: Updated configuration or None if cancelled
         """
-        # Set theme
-        sg.theme('DarkBlue')
-        
         # Get list of audio devices
         audio_devices = self.audio_capture.list_devices()
         device_names = [f"{device['index']}: {device['name']}" for device in audio_devices]
         
         # Get list of models
-        models_dir = Path.home() / ".wakeword" / "models"
+        models_dir = Path.home() / ".neptune" / "models"
         model_files = list(models_dir.glob("*.pth"))
         model_names = [model.name for model in model_files]
         
@@ -204,7 +201,7 @@ class ConfigWindow:
             # Parse model path
             model_name = values['-MODEL-']
             if model_name:
-                model_path = str(Path.home() / ".wakeword" / "models" / model_name)
+                model_path = str(Path.home() / ".neptune" / "models" / model_name)
             else:
                 model_path = None
             

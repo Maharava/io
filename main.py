@@ -1,5 +1,5 @@
 """
-Wake Word Detection Engine - Main Application
+Neptune Wake Word Detection Engine - Main Application
 """
 import os
 import sys
@@ -9,6 +9,9 @@ import threading
 import queue
 import time
 from pathlib import Path
+
+# Update Python path to include the current directory
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Local imports
 from audio.capture import AudioCapture
@@ -21,7 +24,7 @@ from ui.tray import SystemTrayApp
 # Set up logging
 def setup_logging():
     """Set up logging with proper directory creation"""
-    log_dir = Path.home() / ".wakeword"
+    log_dir = Path.home() / ".neptune"
     log_dir.mkdir(exist_ok=True)
     
     logging.basicConfig(
@@ -29,16 +32,16 @@ def setup_logging():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_dir / "wakeword.log")
+            logging.FileHandler(log_dir / "neptune.log")
         ]
     )
-    return logging.getLogger("WakeWord")
+    return logging.getLogger("Neptune")
 
 logger = setup_logging()
 
 def ensure_app_directories():
     """Create necessary application directories if they don't exist"""
-    app_dir = Path.home() / ".wakeword"
+    app_dir = Path.home() / ".neptune"
     models_dir = app_dir / "models"
     config_dir = app_dir / "config"
     training_dir = app_dir / "training_data"
@@ -212,6 +215,20 @@ def main():
     
     # Create audio processor
     processor = AudioProcessor(config)
+    
+    # Check if we should start in training mode
+    if config.get("start_in_training", False):
+        # Create a training window directly
+        training_window = TrainingWindow(config)
+        result = training_window.run()
+        
+        # If training completed successfully, update the model
+        if result and result.get('success') and 'model_path' in result:
+            config['model_path'] = result['model_path']
+            save_config(config)
+            
+            # Update the audio processor with new config
+            processor.update_config(config)
     
     # Start the system tray application (this will block until exit)
     app = SystemTrayApp(

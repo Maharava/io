@@ -4,7 +4,7 @@ Setup script for wake word detection engine
 from setuptools import setup, find_packages
 
 setup(
-    name="wakeword",
+    name="Neptune",
     version="0.1.0",
     packages=find_packages(),
     install_requires=[

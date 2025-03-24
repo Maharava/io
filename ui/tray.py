@@ -1,16 +1,16 @@
 """
-System tray application for wake word engine
+System tray application for Neptune wake word engine
 """
 import sys
 import logging
 import threading
 import pystray
 from PIL import Image, ImageDraw
-from ..utils.config import load_config, save_config
-from .config import ConfigWindow
-from .training_ui import TrainingWindow
+from utils.config import load_config, save_config
+from ui.config import ConfigWindow
+from ui.training_ui import TrainingWindow
 
-logger = logging.getLogger("WakeWord.UI")
+logger = logging.getLogger("Neptune.UI")
 
 class SystemTrayApp:
     def __init__(self, audio_processor, config):
@@ -34,11 +34,13 @@ class SystemTrayApp:
         image = Image.new('RGB', size, color=(0, 0, 0))
         dc = ImageDraw.Draw(image)
         
-        # Draw a microphone-like shape
-        dc.rectangle((16, 16, 48, 40), fill=(0, 128, 255))
-        dc.ellipse((20, 8, 44, 24), fill=(0, 128, 255))
-        dc.rectangle((28, 40, 36, 56), fill=(0, 128, 255))
-        dc.ellipse((20, 48, 44, 64), fill=(0, 128, 255))
+        # Draw a Neptune-like shape (trident)
+        # Base
+        dc.rectangle((28, 16, 36, 56), fill=(0, 128, 255))
+        # Top points
+        dc.polygon([(16, 16), (28, 24), (28, 16)], fill=(0, 128, 255))
+        dc.polygon([(36, 16), (36, 24), (48, 16)], fill=(0, 128, 255))
+        dc.polygon([(28, 16), (36, 16), (32, 8)], fill=(0, 128, 255))
         
         return image
     
@@ -48,11 +50,11 @@ class SystemTrayApp:
         
         if item_text == 'enable':
             self.audio_processor.start()
-            logger.info("Wake word detection enabled")
+            logger.info("Neptune wake word detection enabled")
         
         elif item_text == 'disable':
             self.audio_processor.stop()
-            logger.info("Wake word detection disabled")
+            logger.info("Neptune wake word detection disabled")
         
         elif item_text == 'settings':
             # Open settings window
@@ -132,9 +134,9 @@ class SystemTrayApp:
         
         # Create the tray icon
         self.tray_icon = pystray.Icon(
-            'WakeWordDetector',
+            'NeptuneWakeWordDetector',
             self.icon_image,
-            'Wake Word Detector',
+            'Neptune Wake Word Detector',
             menu=pystray.Menu(*menu_items)
         )
         

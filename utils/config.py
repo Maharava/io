@@ -6,11 +6,11 @@ import logging
 from pathlib import Path
 import os
 
-logger = logging.getLogger("WakeWord.Config")
+logger = logging.getLogger("Neptune.Config")
 
 def get_config_path():
     """Get path to configuration file"""
-    config_dir = Path.home() / ".wakeword" / "config"
+    config_dir = Path.home() / ".neptune" / "config"
     config_file = config_dir / "config.json"
     return config_file
 
