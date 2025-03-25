@@ -205,11 +205,10 @@ class AudioProcessor:
         
         # Update configuration
         self.config = config
-        # Update detector threshold from config
-        threshold = config.get("threshold", 0.85)
-        self.detector.set_threshold(threshold)
-        logger.info(f"Set detector threshold to {threshold}")
-    
+        
+        # Update detector threshold
+        self.detector.set_threshold(config["threshold"])
+        
         # Update model if path changed
         if model_path_changed and config.get("model_path"):
             logger.info(f"Loading model from path: {config['model_path']}")

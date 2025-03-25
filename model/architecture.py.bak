@@ -15,38 +15,6 @@ def calculate_conv_output_length(input_length, kernel_size, stride, padding=0):
     """Calculate output length after a conv/pool layer with precise PyTorch formula"""
     return math.floor((input_length + 2 * padding - kernel_size) / stride + 1)
 
-
-class SimpleWakeWordModel(nn.Module):
-    """Simplified CNN model for wake word detection"""
-    
-    def __init__(self, n_mfcc=13, num_frames=101):
-        super(SimpleWakeWordModel, self).__init__()
-        
-        # A simpler architecture with fewer layers
-        self.conv_layer = nn.Sequential(
-            nn.Conv1d(n_mfcc, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=3, stride=2, padding=0)
-        )
-        
-        # Calculate output size
-        output_width = calculate_conv_output_length(num_frames, 3, 2, 0)
-        self.fc_input_size = 32 * output_width
-        
-        self.fc_layers = nn.Sequential(
-            nn.Linear(self.fc_input_size, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        x = self.conv_layer(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc_layers(x)
-        return x
-
-
 class WakeWordModel(nn.Module):
     """1D CNN model for wake word detection"""
     
@@ -119,13 +87,8 @@ def create_model(n_mfcc=13, num_frames=101):
 def save_model(model, path):
     """Save model to disk with proper resource management"""
     try:
-        if model is None:
-            logger.error("Cannot save None model")
-            return False
-            
         # Ensure the directory exists
-        path = Path(path) if not isinstance(path, Path) else path
-        path.parent.mkdir(parents=True, exist_ok=True)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         
         # Save the model
         torch.save(model.state_dict(), path)
@@ -137,12 +100,12 @@ def save_model(model, path):
 
 
 def load_model(path, n_mfcc=13, num_frames=101):
-    """Load model from disk with automatic architecture detection"""
+    """Load model from disk with robust error handling"""
     if not path:
         logger.error("Model path is None")
         return None
-    
-    # Convert to Path object and check if it exists
+        
+    # Convert to Path object for consistent handling
     path = Path(path) if not isinstance(path, Path) else path
     
     if not path.exists():
@@ -150,22 +113,33 @@ def load_model(path, n_mfcc=13, num_frames=101):
         return None
     
     try:
-        # Load state dictionary to check architecture
+        # Create a new model with exact same architecture
+        model = create_model(n_mfcc=n_mfcc, num_frames=num_frames)
+        
+        # Load state dictionary
         state_dict = torch.load(path, map_location=torch.device('cpu'))
         
-        # Check for model architecture by examining state_dict keys
-        is_simple_model = any('conv_layer' in key for key in state_dict.keys())
-        logger.info(f"Detected {'SimpleWakeWordModel' if is_simple_model else 'WakeWordModel'} architecture")
+        # Check for compatibility
+        expected_keys = set(model.state_dict().keys())
+        loaded_keys = set(state_dict.keys())
         
-        # Create the appropriate model based on detected architecture
-        if is_simple_model:
-            logger.info(f"Creating SimpleWakeWordModel with n_mfcc={n_mfcc}, num_frames={num_frames}")
-            model = SimpleWakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
-        else:
-            logger.info(f"Creating WakeWordModel with n_mfcc={n_mfcc}, num_frames={num_frames}")
-            model = WakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
+        if expected_keys != loaded_keys:
+            logger.error(f"Model architecture mismatch. Expected keys: {expected_keys}, got: {loaded_keys}")
+            logger.error("This probably means the loaded model was trained with a different architecture.")
+            return None
+            
+        # Check for shape compatibility in first layer
+        first_layer_key = "conv_layers.0.weight"
+        if first_layer_key in state_dict:
+            loaded_shape = state_dict[first_layer_key].shape
+            expected_shape = model.state_dict()[first_layer_key].shape
+            
+            if loaded_shape != expected_shape:
+                logger.error(f"First layer shape mismatch. Expected: {expected_shape}, got: {loaded_shape}")
+                logger.error("This means the model was trained with different MFCC parameters.")
+                return None
         
-        # Load the weights
+        # All checks passed, load the weights
         model.load_state_dict(state_dict)
         model.eval()  # Set to evaluation mode
         

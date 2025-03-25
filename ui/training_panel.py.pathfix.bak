@@ -164,7 +164,7 @@ class TrainingThread(threading.Thread):
             if self.progress_callback:
                 self.progress_callback("Saving model...", 90)
             
-            models_dir = __import__('pathlib').Path.home() / ".io" / "models"
+            models_dir = Path.home() / ".io" / "models"
             models_dir.mkdir(parents=True, exist_ok=True)
             
             model_path = str(models_dir / self.model_name)
@@ -225,7 +225,7 @@ class TrainingPanel(ctk.CTkFrame):
         self.training_thread = None
         
         # Training data directories
-        self.data_dir = __import__('pathlib').Path.home() / ".io" / "training_data"
+        self.data_dir = Path.home() / ".io" / "training_data"
         self.wake_word_dir = self.data_dir / "wake_word"
         self.negative_dir = self.data_dir / "negative"
         
@@ -862,10 +862,7 @@ class TrainingPanel(ctk.CTkFrame):
         # Check again later
         self.after(500, self._check_training_completion)
     
-    def _on_training_success(
-        # Ensure Path is available
-        from pathlib import Path
-        self, result):
+    def _on_training_success(self, result):
         """Handle successful training completion"""
         self._set_training_state(False)
         self.status_text.configure(text="Training completed successfully!")
