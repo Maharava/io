@@ -10,7 +10,7 @@ import wave
 import tkinter as tk
 import customtkinter as ctk
 import numpy as np
-from pathlib import Path
+from pathlib import Path  # Ensure Path is imported at the top level
 import shutil
 
 logger = logging.getLogger("Io.UI.Training")
@@ -160,45 +160,75 @@ class TrainingThread(threading.Thread):
                 progress_callback=self.progress_callback
             )
             
+            # Check if model training failed
+            if model is None:
+                self.result = {
+                    "success": False,
+                    "error": "Training failed - returned None model"
+                }
+                if self.progress_callback:
+                    self.progress_callback("Error: Training failed to produce a valid model", -1)
+                return
+            
             # Save model
             if self.progress_callback:
                 self.progress_callback("Saving model...", 90)
             
-            models_dir = __import__('pathlib').Path.home() / ".io" / "models"
+            # Create models directory
+            models_dir = Path.home() / ".io" / "models"
             models_dir.mkdir(parents=True, exist_ok=True)
             
             model_path = str(models_dir / self.model_name)
+            
             try:
-                # Try the standard way first
-                if hasattr(model, 'state_dict'):
-                    trainer.save_trained_model(model, model_path)
+                # Try trainer's save method first
+                if hasattr(trainer, 'save_trained_model'):
+                    success = trainer.save_trained_model(model, model_path)
+                    if not success:
+                        raise Exception("Trainer's save_trained_model returned False")
                 else:
-                    # Direct save fallback
+                    # Fallback to direct save
                     import torch
-                    from pathlib import Path
-                    
                     # Ensure directory exists
                     Path(model_path).parent.mkdir(parents=True, exist_ok=True)
-                    
-                    # Save the model
                     torch.save(model.state_dict(), model_path)
-            except AttributeError:
-                # Fall back to direct save if method doesn't exist
-                import torch
-                # Ensure directory exists
-                Path(model_path).parent.mkdir(parents=True, exist_ok=True)
-                # Save the model
-                torch.save(model.state_dict(), model_path)
-                # Update result
-                self.result["model_path"] = model_path
-            
-            self.result = {
-                "success": True,
-                "model_path": model_path
-            }
-            
-            if self.progress_callback:
-                self.progress_callback("Training complete!", 100)
+                
+                self.result = {
+                    "success": True,
+                    "model_path": model_path
+                }
+                
+                if self.progress_callback:
+                    self.progress_callback("Training complete!", 100)
+                
+            except Exception as e:
+                logger.error(f"Error saving model: {e}")
+                
+                # Try fallback method for saving
+                try:
+                    import torch
+                    # Ensure directory exists
+                    Path(model_path).parent.mkdir(parents=True, exist_ok=True)
+                    torch.save(model.state_dict(), model_path)
+                    
+                    self.result = {
+                        "success": True,
+                        "model_path": model_path
+                    }
+                    
+                    if self.progress_callback:
+                        self.progress_callback("Training complete (with fallback save)!", 100)
+                        
+                except Exception as e2:
+                    logger.error(f"Fallback save failed too: {e2}")
+                    
+                    self.result = {
+                        "success": False,
+                        "error": f"Failed to save model: {str(e2)}"
+                    }
+                    
+                    if self.progress_callback:
+                        self.progress_callback(f"Error: {str(e2)}", -1)
             
         except Exception as e:
             logger.error(f"Error training model: {e}")
@@ -225,7 +255,7 @@ class TrainingPanel(ctk.CTkFrame):
         self.training_thread = None
         
         # Training data directories
-        self.data_dir = __import__('pathlib').Path.home() / ".io" / "training_data"
+        self.data_dir = Path.home() / ".io" / "training_data"
         self.wake_word_dir = self.data_dir / "wake_word"
         self.negative_dir = self.data_dir / "negative"
         
@@ -862,10 +892,7 @@ class TrainingPanel(ctk.CTkFrame):
         # Check again later
         self.after(500, self._check_training_completion)
     
-    def _on_training_success(
-        # Ensure Path is available
-        from pathlib import Path
-        self, result):
+    def _on_training_success(self, result):
         """Handle successful training completion"""
         self._set_training_state(False)
         self.status_text.configure(text="Training completed successfully!")

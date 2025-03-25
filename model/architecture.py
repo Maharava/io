@@ -111,9 +111,12 @@ class WakeWordModel(nn.Module):
         return x
 
 
-def create_model(n_mfcc=13, num_frames=101):
+def create_model(n_mfcc=13, num_frames=101, simple=False):
     """Create a new wake word model"""
-    return WakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
+    if simple:
+        return SimpleWakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
+    else:
+        return WakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
 
 
 def save_model(model, path):
@@ -127,9 +130,20 @@ def save_model(model, path):
         path = Path(path) if not isinstance(path, Path) else path
         path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Save the model
+        # Save the model state dict
         torch.save(model.state_dict(), path)
         logger.info(f"Model saved to {path}")
+        
+        # Save model info for reference
+        try:
+            info_path = path.parent / f"{path.stem}_info.txt"
+            with open(info_path, 'w') as f:
+                model_type = "simple" if isinstance(model, SimpleWakeWordModel) else "standard"
+                f.write(f"Model type: {model_type}\n")
+                f.write(f"Save date: {__import__('datetime').datetime.now()}\n")
+        except Exception as e:
+            logger.warning(f"Error saving model info: {e}")
+            
         return True
     except Exception as e:
         logger.error(f"Error saving model: {e}")
@@ -165,9 +179,28 @@ def load_model(path, n_mfcc=13, num_frames=101):
             logger.info(f"Creating WakeWordModel with n_mfcc={n_mfcc}, num_frames={num_frames}")
             model = WakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
         
-        # Load the weights
-        model.load_state_dict(state_dict)
-        model.eval()  # Set to evaluation mode
+        # Try loading the state dict
+        try:
+            model.load_state_dict(state_dict)
+        except Exception as e:
+            logger.error(f"Error loading state dict: {e}")
+            logger.warning("This might be due to model architecture mismatch. Trying the other architecture...")
+            
+            # Try the other architecture
+            if is_simple_model:
+                model = WakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
+            else:
+                model = SimpleWakeWordModel(n_mfcc=n_mfcc, num_frames=num_frames)
+                
+            try:
+                model.load_state_dict(state_dict)
+                logger.info("Successfully loaded with alternate architecture")
+            except Exception as e2:
+                logger.error(f"Failed with alternate architecture too: {e2}")
+                return None
+        
+        # Set to evaluation mode
+        model.eval()
         
         logger.info(f"Model loaded successfully from {path}")
         return model

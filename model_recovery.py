@@ -5,7 +5,6 @@ Wake Word Model Recovery Tool
 This script helps recover trained models by:
 1. Finding checkpoint files from training
 2. Converting the checkpoint to a usable model
-3. Creating a simple model architecture that matches the checkpoint
 
 Usage:
     python model_recovery.py
