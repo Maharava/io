@@ -37,11 +37,11 @@ class WakeWordDetector:
         
         # Detection debouncing to prevent rapid-fire detections
         self.last_detection_time = 0
-        self.detection_cooldown = 3.0  # seconds
+        self.detection_cooldown = 2.0  # seconds
         
         # Consecutive frames counter
         self.high_confidence_streak = 0
-        self.required_streak = 3
+        self.required_streak = 2
         
         # Thread safety
         self.lock = threading.Lock()
